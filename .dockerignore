@@ -1,0 +1,12 @@
+.git
+.gitignore
+.DS_Store
+__pycache__/
+*.py[cod]
+tests/
+data/*.db
+data/*.db-*
+.env
+.venv/
+*.log
+

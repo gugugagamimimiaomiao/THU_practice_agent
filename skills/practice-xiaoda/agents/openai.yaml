@@ -1,0 +1,4 @@
+interface:
+  display_name: "实践小搭"
+  short_description: "结构化公众号实践项目，提供证据化匹配、审核与行动支持"
+  default_prompt: "使用 $practice-xiaoda 导入一则社会实践招募通知，核验资格与截止时间，并给出带来源证据的推荐。"

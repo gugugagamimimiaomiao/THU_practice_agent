@@ -1,0 +1,20 @@
+services:
+  practice-xiaoda:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8000
+      PRACTICE_XIAODA_ENV: production
+      PRACTICE_XIAODA_DB: /data/practice_xiaoda.db
+      PUBLIC_DASHBOARD: "false"
+    volumes:
+      - practice_xiaoda_data:/data
+    restart: unless-stopped
+
+volumes:
+  practice_xiaoda_data:
+

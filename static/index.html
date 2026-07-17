@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="实践小搭——清华学生社会实践机会决策与行动智能体 MVP">
+  <title>实践小搭 · 社会实践智能助手</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true"><span>搭</span></div>
+        <div><strong>实践小搭</strong><small>Practice Copilot</small></div>
+      </div>
+
+      <nav class="nav" aria-label="主导航">
+        <button class="nav-item active" data-page="dashboard">
+          <span class="nav-icon">⌂</span><span>总览</span>
+        </button>
+        <button class="nav-item" data-page="projects">
+          <span class="nav-icon">◇</span><span>机会库</span><em id="navProjectCount">0</em>
+        </button>
+        <button class="nav-item" data-page="ingest">
+          <span class="nav-icon">＋</span><span>导入与审核</span><em id="navReviewCount" class="warn">0</em>
+        </button>
+        <button class="nav-item" data-page="recommend">
+          <span class="nav-icon">◎</span><span>智能推荐</span>
+        </button>
+        <button class="nav-item" data-page="workspace">
+          <span class="nav-icon">✦</span><span>行动工作台</span>
+        </button>
+        <button class="nav-item" data-page="developer">
+          <span class="nav-icon">⚙</span><span>开发者采集</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-card">
+        <div class="pulse-dot"></div>
+        <div><strong>数据诚实模式</strong><p>关键字段必须有来源；不确定信息单独提示。</p></div>
+      </div>
+      <div class="sidebar-footer"><span>比赛 MVP · v0.9</span><span>本地优先</span></div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <button class="mobile-menu" id="mobileMenu" aria-label="打开导航">☰</button>
+        <div>
+          <p class="eyebrow" id="pageEyebrow">PRACTICE XIAODA</p>
+          <h1 id="pageTitle">实践机会总览</h1>
+        </div>
+        <div class="top-actions">
+          <span class="demo-pill"><i></i> 当前含演示数据</span>
+          <button class="icon-button" id="exportBtn" title="导出项目库">⇩</button>
+          <button class="avatar" title="本地演示账户">TX</button>
+        </div>
+      </header>
+
+      <div class="content">
+        <section class="page active" id="page-dashboard">
+          <article class="hero-card">
+            <div class="hero-copy">
+              <span class="hero-kicker">从一篇招募通知，到一次有准备的实践</span>
+              <h2>找对项目，也把实践真正做起来。</h2>
+              <p>聚合公众号与院系通知，核验截止时间和资格限制，再陪你完成报名、外联、访谈、行程与报告。</p>
+              <div class="hero-actions">
+                <button class="primary-button" data-go="recommend">开始匹配 <span>→</span></button>
+                <button class="ghost-button light" data-go="ingest">导入一则通知</button>
+              </div>
+            </div>
+            <div class="hero-visual" aria-hidden="true">
+              <div class="orbit orbit-one"></div><div class="orbit orbit-two"></div>
+              <div class="hero-core"><span>实践</span><strong>小搭</strong><small>AI COPILOT</small></div>
+              <div class="floating-chip chip-a">证据可追溯</div>
+              <div class="floating-chip chip-b">资格硬过滤</div>
+              <div class="floating-chip chip-c">行动闭环</div>
+            </div>
+          </article>
+
+          <div class="stat-grid">
+            <article class="stat-card"><div class="stat-icon indigo">◇</div><div><span>项目总数</span><strong id="statTotal">—</strong><small>含历史项目</small></div></article>
+            <article class="stat-card"><div class="stat-icon green">✓</div><div><span>可正式推荐</span><strong id="statPublished">—</strong><small>已通过关键字段核验</small></div></article>
+            <article class="stat-card"><div class="stat-icon amber">!</div><div><span>等待复核</span><strong id="statReview">—</strong><small>不会混入正式推荐</small></div></article>
+            <article class="stat-card"><div class="stat-icon cyan">⌁</div><div><span>信息来源</span><strong id="statSources">—</strong><small>公众号与投稿渠道</small></div></article>
+          </div>
+
+          <div class="dashboard-grid">
+            <section class="panel featured-panel">
+              <div class="panel-heading"><div><span class="section-label">CURATED</span><h3>近期实践机会</h3></div><button class="text-button" data-go="projects">查看全部 →</button></div>
+              <div id="featuredProjects" class="featured-list skeleton-block"></div>
+            </section>
+            <aside class="panel insight-panel">
+              <div class="panel-heading"><div><span class="section-label">PIPELINE</span><h3>项目数据健康度</h3></div></div>
+              <div class="donut-wrap">
+                <div class="donut" id="healthDonut"><div><strong id="healthPercent">—</strong><small>可推荐</small></div></div>
+                <div class="legend">
+                  <p><i class="legend-published"></i><span>已核验</span><strong id="legendPublished">—</strong></p>
+                  <p><i class="legend-review"></i><span>待复核</span><strong id="legendReview">—</strong></p>
+                  <p><i class="legend-expired"></i><span>已过期</span><strong id="legendExpired">—</strong></p>
+                </div>
+              </div>
+              <div class="trust-note"><span>◆</span><p><strong>为什么不追求全自动？</strong>截止日期、院系资格与报销信息必须能回到原文核验；高风险字段始终保留人工审核。</p></div>
+            </aside>
+          </div>
+
+          <section class="panel activity-panel">
+            <div class="panel-heading"><div><span class="section-label">TRACE</span><h3>最近活动</h3></div></div>
+            <div id="activityList" class="activity-list"><p class="muted">正在载入…</p></div>
+          </section>
+        </section>
+
+        <section class="page" id="page-projects">
+          <div class="toolbar-card">
+            <label class="search-field"><span>⌕</span><input id="projectSearch" type="search" placeholder="搜索项目、主题、地点或来源…"></label>
+            <select id="statusFilter" aria-label="状态筛选">
+              <option value="active">真实采集优先（可报名与待复核）</option><option value="real">仅真实采集</option><option value="demo">仅演示数据</option><option value="published">仅已核验</option>
+              <option value="needs_review">仅待复核</option><option value="expired">历史项目</option><option value="all">全部状态</option>
+            </select>
+            <select id="themeFilter" aria-label="主题筛选"><option value="">全部主题</option></select>
+            <button class="secondary-button" id="compareBtn" disabled>比较项目 <span id="compareCount">0</span></button>
+          </div>
+          <div class="library-summary"><p id="projectSummary">正在载入项目…</p><span>正式推荐只使用“已核验”项目</span></div>
+          <div class="project-grid" id="projectGrid"></div>
+          <div class="empty-state hidden" id="projectEmpty"><div>⌕</div><h3>没有找到符合条件的项目</h3><p>尝试清除筛选条件，或导入新的公众号通知。</p></div>
+        </section>
+
+        <section class="page" id="page-ingest">
+          <div class="split-layout ingest-layout">
+            <section class="panel form-panel">
+              <div class="panel-heading"><div><span class="section-label">INGEST</span><h3>导入新的项目线索</h3></div><span class="step-pill">01 · 采集</span></div>
+              <div class="source-tabs" role="tablist">
+                <button class="source-tab active" data-type="wechat_url">公众号链接导入</button>
+                <button class="source-tab" data-type="copied_text">手动信息导入</button>
+              </div>
+              <form id="ingestForm">
+                <input type="hidden" id="inputType" value="wechat_url">
+                <div class="link-import-fields">
+                  <label><span>公众号文章链接</span><input id="sourceUrl" type="url" placeholder="https://mp.weixin.qq.com/s/…"></label>
+                  <p class="panel-intro">只粘贴文章链接即可。系统会自动读取正文、提取项目卡；如遇微信验证，可展开下方临时填写 Cookie。</p>
+                  <details class="credential-guide user-credential" id="userCredentialGuide">
+                    <summary>链接抓取失败？临时输入自己的 Cookie（本次请求后不保存）</summary>
+                    <p>仅用于本次请求，并且只会发给 <code>mp.weixin.qq.com</code>。登录微信公众平台后，按下方教程复制 Cookie；不要输入微信密码或把 Cookie 发给他人。</p>
+                    <textarea id="userWechatCookie" rows="3" autocomplete="off" placeholder="粘贴本次使用的完整 Cookie；完成导入后自动清空"></textarea>
+                    <ol><li>在浏览器登录 <code>https://mp.weixin.qq.com</code>。</li><li>按 F12 打开开发者工具，选择 Network（网络）。</li><li>刷新页面，点任意一个 <code>mp.weixin.qq.com</code> 请求。</li><li>在 Request Headers 中复制完整 <code>Cookie</code> 值，粘贴到上方。</li></ol>
+                  </details>
+                </div>
+                <div class="manual-import-fields hidden">
+                  <div class="form-row two">
+                  <label><span>来源公众号 / 提交方</span><input id="sourceAccount" placeholder="链接导入会自动识别；也可手动填写"></label>
+                  <label><span>文章标题（可选）</span><input id="sourceTitle" placeholder="未填写时从正文首行识别"></label>
+                  </div>
+                  <label><span>原文链接（可选）</span><input id="manualSourceUrl" type="url" placeholder="有公众号链接时请保留，便于追溯"></label>
+                  <label><span>通知内容</span><textarea id="rawText" rows="13" placeholder="粘贴正文、OCR 文字，或手动整理项目名称、时间、地点、参与资格、经费和报名方式。"></textarea></label>
+                </div>
+                <div class="truth-banner"><span>i</span><p>系统只根据正文或明确的手动信息生成项目卡。图片里的文字需经过 OCR 或人工复核；不明确的截止日期、资格与经费会标记为待确认。</p></div>
+                <div class="form-actions"><button type="button" class="ghost-button" id="fillSampleBtn">填入演示通知</button><button class="primary-button" type="submit" id="ingestSubmitBtn">导入公众号链接 <span>→</span></button></div>
+              </form>
+              <div class="result-card hidden" id="ingestResult"></div>
+            </section>
+
+            <aside class="panel review-panel">
+              <div class="panel-heading"><div><span class="section-label">REVIEW</span><h3>待人工复核</h3></div><span class="step-pill warn">02 · 审核</span></div>
+              <p class="panel-intro">截止日期、资格、报销、来源或报名方式缺失的项目会停在这里。</p>
+              <div id="reviewQueue" class="review-queue"></div>
+            </aside>
+          </div>
+        </section>
+
+        <section class="page" id="page-developer">
+          <div class="developer-hero">
+            <div><span class="section-label">DEVELOPER COLLECTOR</span><h2>把“选配置、改配置、更新机会库”分开做。</h2><p>先从左侧选择一份采集配置；中间只编辑这份配置；保存后再点击“更新”立即运行。Token 和 Cookie 只在填写或替换时提交，已保存的凭证不会回显。</p></div>
+            <span class="step-pill" id="collectorStatusPill">正在读取状态…</span>
+          </div>
+          <div class="developer-grid">
+            <aside class="panel profile-library-panel">
+              <div class="panel-heading"><div><span class="section-label">1 · SELECT</span><h3>采集配置</h3></div><span class="profile-count" id="profileCount">0 份</span></div>
+              <p class="profile-library-intro">一份配置对应一组公众号、运行时间和微信凭证。点击配置即可切换编辑。</p>
+              <div class="profile-library" id="savedProfileList" aria-label="已保存的采集配置"></div>
+            </aside>
+            <section class="panel form-panel collector-editor-panel">
+              <div class="panel-heading collector-editor-heading"><div><span class="section-label">2 · EDIT</span><h3 id="collectorEditorTitle">正在加载配置…</h3><p id="collectorEditorHint" class="collector-editor-hint">选择左侧配置后，在此编辑。</p></div><span class="step-pill" id="collectorEditorPill">未保存</span></div>
+              <form id="developerCollectorForm">
+                <input id="collectorProfile" type="hidden" value="__new__">
+                <section class="collector-form-section"><div class="collector-section-heading"><span>基本信息</span><small>决定此配置何时检查哪些公众号</small></div>
+                  <label><span>配置名称</span><input id="collectorProfileName" placeholder="例如：学生公益日更"></label>
+                  <label class="toggle-line"><input id="collectorEnabled" type="checkbox"><span>启用每日自动更新</span><small>服务运行时，在设定时间自动检查下方公众号的新文章。</small></label>
+                  <div class="form-row two"><label><span>每日运行时间</span><input id="collectorDailyTime" type="time" value="08:15"></label><label><span>监测公众号（用逗号分隔）</span><input id="collectorAccounts" value="清华大学社会实践, 无限之声, 清华大学学生公益"></label></div>
+                </section>
+                <section class="collector-form-section credential-section"><div class="collector-section-heading"><span>微信采集凭证</span><small id="credentialState">留空会保留当前已保存的凭证</small></div>
+                  <label><span>微信公众平台 Token</span><input id="collectorToken" type="password" autocomplete="off" placeholder="只在需要新增或替换时填写"></label>
+                  <label><span>微信公众平台 Cookie</span><textarea id="collectorCookie" rows="3" autocomplete="off" placeholder="只在需要新增或替换时粘贴完整 Cookie"></textarea></label>
+                  <details class="credential-guide"><summary>如何获取 Token 和 Cookie？</summary><ol><li>用开发者自己的公众号账号登录 <code>https://mp.weixin.qq.com</code>。</li><li>从地址栏中找到 <code>token=</code> 后的一串数字，填入 Token。</li><li>按 F12 → Network（网络）→ 刷新，点任意 <code>mp.weixin.qq.com</code> 请求。</li><li>在 Request Headers 中复制完整 <code>Cookie</code> 值，填入上方。</li><li>保存配置后，点击“更新”验证；Cookie 失效时按同样步骤重新填写。</li></ol></details>
+                </section>
+                <details class="advanced-collector"><summary>高级：历史补全与本地采集器</summary><p>只在本次点击“更新”时生效。留空即只检查最近文章；填写日期可回补旧文章并重新 OCR，最多每个公众号 100 篇。</p><div class="form-row two"><label><span>本次历史补全起始日期（可选）</span><input id="collectorBackfillSince" type="date"></label><label><span>本次每号最多扫描篇数（可选）</span><input id="collectorBackfillCount" type="number" min="1" max="100" placeholder="例如：50"></label></div><div class="form-row two"><label><span>采集器脚本路径</span><input id="collectorPath" placeholder="/path/to/wechat_collector.py"></label><label><span>采集器 Python 路径</span><input id="collectorPython" placeholder="/path/to/python"></label></div></details>
+                <label class="admin-key-field"><span>管理 API Key（本地演示可留空；公网生产环境必填）</span><input id="developerAdminKey" type="password" autocomplete="off" placeholder="仅保存在当前浏览器会话，用于保护开发者设置"></label>
+                <div class="form-actions collector-actions"><button class="ghost-button" type="button" id="newProfileBtn">新建配置</button><button class="primary-button" type="submit">保存配置 <span>→</span></button><button class="secondary-button" type="button" id="runCollectorBtn">更新</button><button class="delete-button" type="button" id="deleteProfileBtn">删除配置</button></div>
+              </form>
+            </section>
+            <aside class="panel collector-status-card">
+              <div class="panel-heading"><div><span class="section-label">3 · RUN</span><h3>采集状态</h3></div></div>
+              <div id="developerCollectorStatus" class="collector-status"><p class="muted">正在读取状态…</p></div>
+              <div class="trust-note"><span>◆</span><p><strong>“更新”只运行当前选中的配置。</strong>保存配置不会自动开始爬取；用户模块也不会共用这里的 Cookie。</p></div>
+            </aside>
+          </div>
+        </section>
+
+        <section class="page" id="page-recommend">
+          <div class="recommend-hero">
+            <div><span class="section-label">MATCHING ENGINE</span><h2>先确认不能错的，再寻找最适合的。</h2><p>系统先排除已截止、时间冲突和明确不符合资格的项目，再按主题、地点、经费与信息完整度排序。</p></div>
+            <div class="formula"><span>硬条件过滤</span><b>→</b><span>偏好评分</span><b>→</b><span>证据解释</span></div>
+          </div>
+          <div class="split-layout recommend-layout">
+            <section class="panel profile-panel">
+              <div class="panel-heading"><div><span class="section-label">PROFILE</span><h3>你的实践偏好</h3></div><span class="saved-hint" id="profileSaved">本地保存</span></div>
+              <form id="recommendForm">
+                <div class="form-row two">
+                  <label><span>院系</span><input id="profileDepartment" placeholder="例如：社科学院"></label>
+                  <label><span>年级 / 培养层次</span><select id="profileGrade"><option value="">不限</option><option>大一</option><option>大二</option><option>大三</option><option>大四</option><option>硕士生</option><option>博士生</option></select></label>
+                </div>
+                <div class="form-row two"><label><span>可用开始日期</span><input id="availableStart" type="date" value="2026-08-01"></label><label><span>可用结束日期</span><input id="availableEnd" type="date" value="2026-08-25"></label></div>
+                <fieldset><legend>感兴趣的主题</legend><div class="chip-checks" id="themeChecks"></div></fieldset>
+                <fieldset><legend>偏好地点</legend><div class="chip-checks compact"><label><input type="checkbox" name="locations" value="北京"><span>北京</span></label><label><input type="checkbox" name="locations" value="云南"><span>云南</span></label><label><input type="checkbox" name="locations" value="青海"><span>青海</span></label><label><input type="checkbox" name="locations" value="福建"><span>福建</span></label><label><input type="checkbox" name="locations" value="线上"><span>线上/混合</span></label></div></fieldset>
+                <label><span>经费偏好</span><select id="reimbursementPreference"><option value="not_important">不作为主要条件</option><option value="preferred">优先选择有报销/补贴</option><option value="required">必须明确有报销/补贴</option></select></label>
+                <button class="primary-button wide" type="submit">生成个性化推荐 <span>→</span></button>
+              </form>
+            </section>
+            <section class="recommend-results" id="recommendResults">
+              <div class="recommend-placeholder"><div class="radar"><i></i><i></i><i></i><span>◎</span></div><h3>填写左侧信息，获得可解释的匹配结果</h3><p>每个结果都会说明匹配原因、风险字段与原始资格依据。</p></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="page" id="page-workspace">
+          <div class="workspace-heading"><div><span class="section-label">ACTION COPILOT</span><h2>从“想参加”到“准备好”。</h2><p>先选项目，再选当地外联地点；访谈和路线会自动沿用同一组地点。交通部分只使用实时地图查询结果，不会编造地铁线、航班或车次。</p></div></div>
+          <div class="workspace-grid">
+            <section class="panel workspace-controls">
+              <label><span>当前项目</span><select id="workspaceProject"></select></label>
+              <div class="workspace-flow" aria-label="行动工作流"><span>1 选项目</span><i>→</i><span>2 选点位</span><i>→</i><span>3 访谈与路线</span></div>
+              <div class="generator-tabs">
+                <button class="generator-tab active" data-kind="application"><span>01</span>报名陈述</button>
+                <button class="generator-tab" data-kind="outreach"><span>02</span>当地外联</button>
+                <button class="generator-tab" data-kind="interview"><span>03</span>地点访谈</button>
+                <button class="generator-tab" data-kind="itinerary"><span>04</span>路线任务</button>
+                <button class="generator-tab" data-kind="report"><span>05</span>报告框架</button>
+              </div>
+              <input type="hidden" id="generatorKind" value="application">
+              <div id="contextApplicationFields" class="context-kind-fields">
+                <p class="workspace-field-intro">按报名表栏目填写真实要点，系统将输出每一项的简洁润色版，而不是一封连续的自荐信。</p>
+                <div class="form-row two"><label><span>姓名/称呼</span><input id="contextName" placeholder="可留空，生成占位符"></label><label><span>院系</span><input id="contextDepartment" placeholder="例如：社科学院"></label></div>
+                <label><span>相关经历 / 已做准备</span><textarea id="contextStrengths" rows="3" placeholder="如实写课程、志愿服务、组织工作、资料整理等；可有错别字，系统会做保守修正"></textarea></label>
+                <label><span>理想承担岗位</span><input id="contextIdealRole" placeholder="例如：访谈记录、企业联络、路线协调、数据整理"></label>
+                <label><span>报名目的</span><textarea id="contextMotivation" rows="2" placeholder="希望在实践中理解什么、完成什么？"></textarea></label>
+                <label><span>能做什么</span><textarea id="contextContribution" rows="2" placeholder="例如：资料检索、沟通协调、访谈执行、观察记录、成果整理"></textarea></label>
+              </div>
+              <div id="contextOutreachFields" class="context-kind-fields hidden">
+                <p class="workspace-field-intro">系统按目的地和实践主题给出待核验的地点线索。勾选后，访谈和路线任务将只围绕这些地点生成。</p>
+                <label><span>已知并已核验的当地机构/线索（可选）</span><textarea id="contextLocalInfo" rows="3" placeholder="每行一个；可填写机构全称、官网、公开电话/邮箱、项目方推荐。未核验的信息不要填入联系方式。"></textarea></label>
+                <label><span>本次外联的具体目的</span><input id="contextGoal" placeholder="例如：预约访谈、申请参访、了解公开资料"></label>
+                <button type="button" class="secondary-button wide" id="refreshSiteOptions">按项目更新推荐地点</button>
+              </div>
+              <section id="localSitePanel" class="local-site-panel hidden" aria-live="polite">
+                <div class="local-site-head"><div><span class="section-label">LOCAL SITE PICKS</span><h4>当地外联地点</h4></div><span id="selectedSiteCount">未选择</span></div>
+                <p id="localSiteHint" class="muted">选择项目后可生成推荐地点。</p>
+                <div id="localSiteOptions" class="local-site-options"></div>
+                <label><span>补充自定义地点（可选）</span><textarea id="contextPlace" rows="2" placeholder="如果已有确定点位，每行一个；会与上面勾选地点一起用于访谈和路线"></textarea></label>
+              </section>
+              <div id="contextInterviewFields" class="context-kind-fields hidden"><p class="workspace-field-intro">访谈提纲会按上方已勾选的机构/基地分别生成实践主题、访谈对象与专属问题。</p></div>
+              <div id="contextRouteFields" class="context-kind-fields hidden">
+                <p class="workspace-field-intro">酒店位置和已选地点是路线生成的必要输入。实时公交/地铁、驾车、步行结果需要由地图服务查询；无结果时系统会明确标注，不会猜线路。</p>
+                <label><span>酒店位置 <em>必填</em></span><input id="contextHotel" placeholder="酒店名称或详细地址，例如：大理古城 XX 酒店"></label>
+                <label><span>进城出发地（可选）</span><input id="contextDeparture" placeholder="例如：北京、北京首都机场、昆明南站"></label>
+                <label><span>实时地图路线结果（可选）</span><textarea id="contextRouteEvidence" rows="3" placeholder="可粘贴高德/百度地图显示的公交/地铁、驾车和步行时间；生成时会据此权衡出行方式"></textarea></label>
+                <div class="route-actions"><button type="button" class="secondary-button" id="queryLiveTransport">查询实时交通</button><button type="button" class="ghost-button" id="openMapSearch">打开地图核验</button></div>
+                <p class="route-query-status muted" id="routeQueryStatus">自动查询需要管理员配置高德地图 Web 服务 Key；未配置时可打开地图核验并粘贴结果。</p>
+              </div>
+              <div id="contextReportFields" class="context-kind-fields hidden"><label><span>实践收获（报告会据此写反思）</span><textarea id="contextPracticeGains" rows="4" placeholder="实践后填写：学到什么、哪些判断被现场修正、协作体验、下一步改进"></textarea></label></div>
+              <button class="primary-button wide" id="generateBtn">生成行动草稿 <span>✦</span></button>
+            </section>
+            <section class="panel output-panel">
+              <div class="output-toolbar"><div><span class="section-label">DRAFT</span><h3 id="outputTitle">报名材料草稿</h3></div><div><button class="icon-button" id="copyOutput" title="复制" disabled>□</button><button class="secondary-button small" id="downloadOutput" disabled>下载 .md</button></div></div>
+              <div id="outputWarnings" class="output-warnings hidden"></div>
+              <pre id="generatedOutput" class="generated-output">选择项目并填写真实信息，然后生成草稿。\n\n所有对外发送或提交的内容，都应由你最后检查确认。</pre>
+              <div class="feedback-strip hidden" id="feedbackStrip"><span>这个草稿有帮助吗？</span><button data-rating="5">很有帮助</button><button data-rating="3">还需修改</button></div>
+            </section>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <div class="modal-backdrop hidden" id="modalBackdrop" role="presentation">
+    <section class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+      <button class="modal-close" id="modalClose" aria-label="关闭">×</button>
+      <div id="modalContent"></div>
+    </section>
+  </div>
+  <div class="toast-region" id="toastRegion" aria-live="polite"></div>
+  <script src="/app.js" defer></script>
+</body>
+</html>

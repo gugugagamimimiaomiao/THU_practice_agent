@@ -1,0 +1,12 @@
+# Public HTTPS reverse proxy for a Docker deployment.
+# Set DOMAIN in .env after pointing the DNS record to this server's public IP.
+{$DOMAIN} {
+    encode zstd gzip
+    reverse_proxy practice-xiaoda:8000
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "no-referrer"
+    }
+}

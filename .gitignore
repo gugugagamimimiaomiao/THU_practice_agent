@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+data/*.db
+data/*.db-*
+data/collector_settings.json
+data/collector_audits/
+data/exports/
+.env
