@@ -1,0 +1,10 @@
+# Shell 脚本和 Docker 相关文件必须是 LF。
+# Windows 上 core.autocrlf=true 会在检出时把它们转成 CRLF，脚本传到 Linux 后
+# 会报 "bad interpreter: /usr/bin/env bash^M"，Dockerfile 里的 RUN 也会出问题。
+*.sh            text eol=lf
+Dockerfile      text eol=lf
+Procfile        text eol=lf
+Caddyfile       text eol=lf
+Makefile        text eol=lf
+*.yaml          text eol=lf
+*.yml           text eol=lf
