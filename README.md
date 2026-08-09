@@ -12,18 +12,39 @@
 
 ## 立即运行
 
-需要 Python 3.8 或更新版本：
+只需要 Python，**不装任何第三方包**。已在 Python 3.10 和 3.13 上验证通过。
+
+macOS / Linux：
 
 ```bash
-cd /Users/sonnette/Desktop/agent/practice-xiaoda-mvp
+git clone https://github.com/Sonnette51/THU_practice_agent.git
+cd THU_practice_agent
 python3 server.py --port 8765
 ```
 
+Windows（PowerShell）：
+
+```powershell
+git clone https://github.com/Sonnette51/THU_practice_agent.git
+cd THU_practice_agent
+py server.py --port 8765
+```
+
+> Windows 上通常没有 `python3` 这个命令，请用 `py` 或 `python`。
+
 然后访问 [http://127.0.0.1:8765](http://127.0.0.1:8765)。
 
-也可以运行 `make run`、`make test` 和 `make check`。
+跑测试：
+
+```bash
+python3 -m unittest discover -s tests    # Windows: py -m unittest discover -s tests
+```
+
+`Makefile` 里的 `make run` / `make test` / `make check` 是同样命令的简写，但 Windows 默认没有 `make`，直接用上面的原始命令即可。
 
 首次启动会在 `data/practice_xiaoda.db` 创建 SQLite 数据库并载入 8 条演示项目。所有演示项目都带有 `demo_data: true` 和醒目的“演示”标识，不能作为真实报名依据。
+
+演示项目的日期是**相对当天生成**的：`seed_data.json` 里的日期按 `anchor_date` 书写，载入时整体平移到今天，因此任何时候首次启动都能看到处于报名中的项目，同时保留一条已过期项目用于演示过期状态。想重新生成一份贴近当天的演示库，删掉 `data/practice_xiaoda.db` 再启动即可。
 
 ## 团队协作：哪些文件不会上传，以及如何获得它们
 
@@ -41,8 +62,8 @@ python3 server.py --port 8765
 ```bash
 git clone git@github.com:Sonnette51/THU_practice_agent.git
 cd THU_practice_agent
-cp .env.example .env
-python3 server.py --port 8765
+cp .env.example .env          # Windows PowerShell: copy .env.example .env
+python3 server.py --port 8765 # Windows PowerShell: py server.py --port 8765
 ```
 
 不要把 `.env`、微信 Token/Cookie、真实数据库、真实用户导出或未脱敏联系人提交到 GitHub。项目根目录的 `.gitignore` 会默认拦截这些文件。
@@ -131,12 +152,12 @@ export WECHAT_COOKIE=your_cookie
 make daily-wechat-update
 ```
 
-在 Linux 上可由 cron 每天运行一次，例如 `15 8 * * * cd /opt/practice-xiaoda-mvp && make daily-wechat-update >> /var/log/practice-xiaoda-wechat.log 2>&1`。不要把 Cookie/Token 放进 crontab 命令、仓库或应用数据库；应放在部署平台的 Secret/环境变量中。
+在 Linux 上可由 cron 每天运行一次，例如 `15 8 * * * cd /opt/THU_practice_agent && make daily-wechat-update >> /var/log/practice-xiaoda-wechat.log 2>&1`。不要把 Cookie/Token 放进 crontab 命令、仓库或应用数据库；应放在部署平台的 Secret/环境变量中。
 
 ## 目录结构
 
 ```text
-practice-xiaoda-mvp/
+THU_practice_agent/
 ├── server.py                 # HTTP API 与静态站点
 ├── domain.py                 # 抽取、状态、推荐、材料生成规则
 ├── database.py               # SQLite 与版本/反馈记录
