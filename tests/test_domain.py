@@ -189,6 +189,44 @@ class DatabaseTests(unittest.TestCase):
             self.assertGreater(feedback_id, 0)
             self.assertEqual(db.stats()["feedback_count"], 1)
 
+    def test_seed_dates_follow_today_so_demo_never_goes_stale(self):
+        """演示数据的日期必须跟着当天走，否则推荐结果会随时间推移变成空。
+
+        seed_data.json 里写的是相对 anchor_date 的日期，载入时整体平移。
+        这里断言的是结果而不是实现：无论哪天跑，都得有报名中的 published 项目。
+        """
+        today = date.today()
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "seed.db")
+            projects = db.list_projects()
+
+            open_now = [
+                p for p in projects
+                if p["status"] == "published"
+                and p.get("signup_deadline")
+                and date.fromisoformat(p["signup_deadline"]) >= today
+            ]
+            self.assertGreaterEqual(len(open_now), 3, "演示库里没有仍在报名的项目，推荐页会是空的")
+
+            # 历史项目是故意留着演示"已过期"状态的，不能被一起推到未来。
+            expired = [p for p in projects if p["status"] == "expired"]
+            self.assertTrue(expired, "演示库里应保留至少一条已过期项目")
+
+            # 关键字段的原文引用必须跟着字段一起平移，否则证据和数据自相矛盾。
+            quoted = [
+                p for p in projects
+                if (p.get("field_evidence") or {}).get("signup_deadline", {}).get("quote")
+            ]
+            self.assertTrue(quoted, "演示数据里应有带截止日期原文引用的项目")
+            for project in quoted:
+                quote = project["field_evidence"]["signup_deadline"]["quote"]
+                deadline = date.fromisoformat(project["signup_deadline"])
+                self.assertIn(
+                    f"{deadline.month}月{deadline.day}日",
+                    quote,
+                    f"{project['title']} 的截止日期与原文引用对不上：{quote}",
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

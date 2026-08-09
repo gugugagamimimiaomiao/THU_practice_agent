@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 from contextlib import contextmanager
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -15,6 +17,52 @@ from domain import deep_merge, json_dumps, now_iso, refresh_status, validate_pro
 ROOT = Path(__file__).resolve().parent
 DEFAULT_DB = ROOT / "data" / "practice_xiaoda.db"
 SEED_FILE = ROOT / "seed_data.json"
+
+# 演示数据里的日期是围绕这一天写的：截止日在其后几天到两周，实践期在其后三到五周。
+# 载入时会把所有日期整体平移 (今天 - 锚点) 天，这样无论哪天首次启动，
+# 演示库里都有处于"报名中"的 published 项目，而"历史项目"仍然保持过期。
+# seed_data.json 里可以用 anchor_date 覆盖这个默认值。
+SEED_ANCHOR_DATE = date(2026, 7, 15)
+
+# 需要平移的日期写法：ISO 日期（可带时间后缀）、带年份的中文日期、不带年份的中文日期。
+# 顺序有意义——带年份的中文写法必须排在不带年份的前面，否则会被后者先吃掉。
+_SEED_DATE_RE = re.compile(
+    r"(?P<iso>\d{4}-\d{2}-\d{2})"
+    r"|(?P<cn_full>(?P<cy>\d{4})年(?P<cm>\d{1,2})月(?P<cd>\d{1,2})日)"
+    r"|(?P<cn_short>(?P<sm>\d{1,2})月(?P<sd>\d{1,2})日)"
+)
+
+# 这些字段是标识符，即使长得像日期也不能改。
+_SEED_DATE_SKIP_KEYS = frozenset({"id", "source_url"})
+
+
+def _shift_seed_dates(value: Any, delta: timedelta, *, key: str | None = None) -> Any:
+    """把演示数据里所有日期整体平移 delta 天，保持字段之间的先后关系不变。
+
+    连原文引用里的"报名截止：2026年7月23日"一起平移，否则字段值和证据引用会
+    互相矛盾——而"每个关键字段都能回查原文"正是这个产品的立身之本。
+    """
+    if key in _SEED_DATE_SKIP_KEYS:
+        return value
+    if isinstance(value, str):
+        return _SEED_DATE_RE.sub(lambda match: _shift_one_date(match, delta), value)
+    if isinstance(value, list):
+        return [_shift_seed_dates(item, delta) for item in value]
+    if isinstance(value, dict):
+        return {k: _shift_seed_dates(v, delta, key=k) for k, v in value.items()}
+    return value
+
+
+def _shift_one_date(match: re.Match[str], delta: timedelta) -> str:
+    if match.group("iso"):
+        return (date.fromisoformat(match.group("iso")) + delta).isoformat()
+    if match.group("cn_full"):
+        moved = date(int(match.group("cy")), int(match.group("cm")), int(match.group("cd"))) + delta
+        return f"{moved.year}年{moved.month}月{moved.day}日"
+    # 不带年份的中文日期按锚点所在年份解析；平移跨年时仍按原格式输出（不补年份），
+    # 以免和同一句话里的其它写法不一致。
+    moved = date(SEED_ANCHOR_DATE.year, int(match.group("sm")), int(match.group("sd"))) + delta
+    return f"{moved.month}月{moved.day}日"
 
 
 class Database:
@@ -112,10 +160,19 @@ class Database:
             count = db.execute("SELECT COUNT(*) FROM projects").fetchone()[0]
         if count or not SEED_FILE.exists():
             return
-        projects = json.loads(SEED_FILE.read_text(encoding="utf-8"))
+        payload = json.loads(SEED_FILE.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            anchor = date.fromisoformat(payload.get("anchor_date", SEED_ANCHOR_DATE.isoformat()))
+            projects = payload.get("projects", [])
+        else:  # 兼容旧版：整个文件就是一个项目数组
+            anchor = SEED_ANCHOR_DATE
+            projects = payload
+        delta = date.today() - anchor
+        if delta:
+            projects = _shift_seed_dates(projects, delta)
         for project in projects:
             self.upsert_project(project, note="初始化演示数据", log_activity=False)
-        self.log("seed", f"已载入 {len(projects)} 条演示项目")
+        self.log("seed", f"已载入 {len(projects)} 条演示项目（日期整体平移 {delta.days} 天）")
 
     def insert_article(self, payload: dict[str, Any]) -> int:
         with self.connect() as db:
