@@ -1,8 +1,10 @@
 import json
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
 
+import chat_adapter
 from chat_adapter import (
     ChatRequestError,
     PracticeChatAdapter,
@@ -133,6 +135,58 @@ class ChatIntentTests(unittest.TestCase):
         result = self.reply("今天北京天气怎么样")
         self.assertEqual(result.intent, "fallback")
         self.assertIn("现在还能报名的项目", result.content)
+
+    def test_natural_phrasing_without_the_word_recommend(self):
+        # 学生实际说话很少带"推荐"两个字。
+        for phrase in ("我八月有空，想去云南做实践", "大三，九月有时间，想参加乡村振兴的实践"):
+            with self.subTest(phrase=phrase):
+                self.assertEqual(self.reply(phrase).intent, "recommend")
+
+    def test_project_card_shows_source_quotes(self):
+        # "关键字段可回查原文"是这个产品的核心主张，对话里必须看得见。
+        result = self.reply(self.project["title"])
+        self.assertIn("原文依据", result.content)
+        quote = self.project["field_evidence"]["signup_deadline"]["quote"]
+        self.assertIn(quote, result.content)
+
+    def test_next_step_hint_uses_a_real_project_not_a_hardcoded_one(self):
+        # 这句提示曾经写死了演示项目名，换成真实数据后会指向不存在的项目。
+        result = self.reply("我大三，八月有空，推荐实践")
+        self.assertEqual(result.intent, "recommend")
+        titles = [p["title"] for p in self.adapter.db.list_projects()]
+        tail = result.content[-200:]
+        self.assertTrue(
+            any(title in tail for title in titles),
+            f"推荐结尾的引导语没有引用任何真实项目：{tail}",
+        )
+
+    def test_welcome_does_not_promise_itinerary_in_chat(self):
+        # 行程需要先勾选点位和住宿位置，对话里做不到；承诺了就是骗用户扑空。
+        content = self.reply("你能做什么").content
+        self.assertIn("行动工作台", content)
+        self.assertNotIn("生成报名陈述、外联话术、访谈提纲、行程", content)
+
+
+class MonthSpanTests(unittest.TestCase):
+    """月份要跟着当前年份走。项目里已经因为写死日期栽过两次。"""
+
+    def test_month_span_rolls_over_to_next_year_once_the_month_has_passed(self):
+        real = date
+
+        class Frozen(real):
+            @classmethod
+            def today(cls):
+                return real(2026, 12, 20)
+
+        original = chat_adapter.date
+        chat_adapter.date = Frozen
+        try:
+            self.assertEqual(chat_adapter._month_span("十二月有空"), ("2026-12-01", "2026-12-31"))
+            self.assertEqual(chat_adapter._month_span("八月有空"), ("2027-08-01", "2027-08-31"))
+            self.assertEqual(chat_adapter._month_span("3月"), ("2027-03-01", "2027-03-31"))
+            self.assertIsNone(chat_adapter._month_span("随便聊聊"))
+        finally:
+            chat_adapter.date = original
 
 
 if __name__ == "__main__":

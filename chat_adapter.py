@@ -7,12 +7,14 @@ by the incoming ``messages`` array, so multiple workers do not require sticky se
 
 from __future__ import annotations
 
+import calendar
 import json
 import os
 import re
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import date
 from typing import Any, Iterable
 
 from database import Database
@@ -181,12 +183,48 @@ RECOMMEND_WORDS = (
     "推荐", "适合我", "找项目", "匹配", "有什么项目", "有哪些项目", "筛选",
     "有报销", "能报销", "可以报销", "有经费", "报销的",
     "还能报名", "还可以报名", "能报的", "报什么",
+    # 学生常见的自然说法，往往一个"推荐"都不带：
+    # 「我八月有空，想去云南做实践」——意图很明确，以前却掉兜底。
+    "想找", "想去", "想参加", "想报", "有空", "有时间", "空闲", "能参加",
 )
 DETAIL_WORDS = ("详情", "介绍", "资格", "截止", "报销", "地点", "时间", "这个项目", "怎么样", "什么条件")
 LIST_WORDS = (
     "项目列表", "全部项目", "近期项目", "实践机会", "有哪些", "还有哪些",
     "快截止", "最近截止", "都有什么",
 )
+
+
+_CN_MONTHS = {
+    "一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6,
+    "七": 7, "八": 8, "九": 9, "十": 10, "十一": 11, "十二": 12,
+}
+
+
+def _month_span(text: str) -> tuple[str, str] | None:
+    """把「八月」「8月」解析成一整个月的起止日期。
+
+    这里原本写死成 2026-07/2026-08 两个月份。写死日期在这个项目里已经咬过
+    两次（演示数据的截止日、推荐页默认可用时间），所以改成按当前年份推算，
+    并且覆盖全部 12 个月：说到的月份如果今年已经整月过完，就理解为明年的该月。
+    """
+    month = None
+    match = re.search(r"(?<!\d)(1[0-2]|[1-9])\s*月", text)
+    if match:
+        month = int(match.group(1))
+    else:
+        for name in sorted(_CN_MONTHS, key=len, reverse=True):
+            if f"{name}月" in text:
+                month = _CN_MONTHS[name]
+                break
+    if not month:
+        return None
+    today = date.today()
+    year = today.year
+    last_day = calendar.monthrange(year, month)[1]
+    if date(year, month, last_day) < today:
+        year += 1
+        last_day = calendar.monthrange(year, month)[1]
+    return f"{year}-{month:02d}-01", f"{year}-{month:02d}-{last_day:02d}"
 
 
 class PracticeChatAdapter:
@@ -304,10 +342,10 @@ class PracticeChatAdapter:
         iso_dates = re.findall(r"20\d{2}-\d{1,2}-\d{1,2}", text)
         if len(iso_dates) >= 2:
             profile["available_start"], profile["available_end"] = iso_dates[:2]
-        elif "八月" in text or "8月" in text:
-            profile["available_start"], profile["available_end"] = "2026-08-01", "2026-08-31"
-        elif "七月" in text or "7月" in text:
-            profile["available_start"], profile["available_end"] = "2026-07-01", "2026-07-31"
+        else:
+            span = _month_span(text)
+            if span:
+                profile["available_start"], profile["available_end"] = span
         return profile
 
     def _recommend(self, text: str) -> ChatResult:
@@ -315,7 +353,19 @@ class PracticeChatAdapter:
         result = recommend_projects(self.db.list_projects(include_expired=True), profile)
         lines = ["## 正式推荐"]
         if not result["eligible"]:
-            lines.append("暂时没有同时满足硬条件且已核验的项目。")
+            # 空结果最容易发生在换了真实数据、或全部项目都过了截止的时候。
+            # 与其只说一句"没有"，不如说清楚是被什么条件挡住的、下一步怎么放宽。
+            blockers: list[str] = []
+            for item in result["excluded"][:6]:
+                blockers.extend(item.get("excluded_reasons", []))
+            top = "；".join(dict.fromkeys(blockers))[:120]
+            lines.append("按你给的条件，暂时没有同时满足硬条件且已核验的项目。")
+            if top:
+                lines.append(f"\n主要卡在：{top}")
+            lines.append(
+                "\n可以试着放宽一个条件——比如换个时间段、去掉地点限制，"
+                "或者说「还有哪些实践机会」看全部在招项目。"
+            )
         for index, item in enumerate(result["eligible"][:5], 1):
             project = item["project"]
             reasons = "；".join(item["reasons"][:3]) or "信息完整度较高"
@@ -333,7 +383,14 @@ class PracticeChatAdapter:
                 lines.append(f"- **{project['title']}**：{warnings}")
         if result["excluded"]:
             lines.append(f"\n另有 {len(result['excluded'])} 个项目因截止、时间、资格或经费硬条件被排除。")
-        lines.append("\n你可以继续说“比较前两个项目”或“为滇西乡村教育数字化调研生成报名理由”。")
+        # 这句提示原本写死了演示项目的名字。换成真实数据后它会指向一个不存在的
+        # 项目，用户照着说必然失败——所以改成引用本次结果里的头名。
+        if result["eligible"]:
+            top_title = result["eligible"][0]["project"]["title"]
+            hint = f"「帮我写{top_title}的报名理由」"
+            if len(result["eligible"]) >= 2:
+                hint = f"「比较前两个推荐项目」，或者{hint}"
+            lines.append(f"\n接下来可以说：{hint}。也可以直接说出项目名，看它的原文依据。")
         return ChatResult("\n".join(lines), "recommend")
 
     def _resolve_project(
@@ -389,7 +446,14 @@ class PracticeChatAdapter:
                 )
             return ChatResult(f"这份材料暂时生成不了：{exc}", f"generate_{kind}_failed", project["id"])
         warnings = "\n\n> 注意：" + "；".join(result["warnings"]) if result["warnings"] else ""
-        return ChatResult(result["content"] + warnings, f"generate_{kind}", project["id"])
+        siblings = {
+            "application": "当地外联话术、访谈提纲、调研报告框架",
+            "outreach": "访谈提纲、报名理由、调研报告框架",
+            "interview": "当地外联话术、报名理由、调研报告框架",
+            "report": "报名理由、当地外联话术、访谈提纲",
+        }.get(kind)
+        hint = f"\n\n还可以为这个项目生成：{siblings}。" if siblings else ""
+        return ChatResult(result["content"] + warnings + hint, f"generate_{kind}", project["id"])
 
     def _compare(self, messages: list[dict[str, Any]], text: str) -> ChatResult:
         projects = self.db.list_projects(include_expired=True)
@@ -412,23 +476,63 @@ class PracticeChatAdapter:
         table = [f"| 维度 | {a['title']} | {b['title']} |", "|---|---|---|"]
         table.extend(f"| {label} | {left} | {right} |" for label, left, right in rows)
         table.append("\n以上信息来自项目卡；正式报名仍应打开原文核对最新通知。")
+        table.append(f"\n接下来可以说：「帮我写{a['title']}的报名理由」，或者直接说出其中一个项目名看它的原文依据。")
         return ChatResult("\n".join(table), "compare")
 
-    @staticmethod
-    def _project_detail(project: dict[str, Any]) -> str:
-        return (
-            f"## {project['title']}\n\n"
-            f"{project.get('summary') or '暂无摘要'}\n\n"
-            f"- 状态：{project.get('status')}\n"
-            f"- 主办方：{project.get('organizer') or '待确认'}\n"
-            f"- 实践时间：{project.get('practice_start') or '待确认'} 至 {project.get('practice_end') or '待确认'}\n"
-            f"- 报名截止：{project.get('signup_deadline') or '待确认'}\n"
-            f"- 地点：{project.get('location', {}).get('detail') or '待确认'}\n"
-            f"- 资格：{project.get('eligibility', {}).get('restriction_text') or '待确认'}\n"
-            f"- 经费：{project.get('reimbursement', {}).get('text') or '待确认'}\n"
-            f"- 报名方式：{project.get('signup_method') or '待确认'}\n"
-            f"- 待确认字段：{'、'.join(project.get('uncertain_fields', [])) or '无'}"
+    # 字段名到中文标签，用于展示原文依据。
+    _EVIDENCE_LABELS = {
+        "signup_deadline": "报名截止",
+        "eligibility": "参与资格",
+        "reimbursement": "经费与报销",
+        "practice_dates": "实践时间",
+        "location": "地点",
+        "signup_method": "报名方式",
+        "contact": "联系方式",
+    }
+
+    @classmethod
+    def _project_detail(cls, project: dict[str, Any]) -> str:
+        lines = [
+            f"## {project['title']}",
+            "",
+            project.get("summary") or "暂无摘要",
+            "",
+            f"- 状态：{project.get('status')}",
+            f"- 主办方：{project.get('organizer') or '待确认'}",
+            f"- 实践时间：{project.get('practice_start') or '待确认'} 至 {project.get('practice_end') or '待确认'}",
+            f"- 报名截止：{project.get('signup_deadline') or '待确认'}",
+            f"- 地点：{project.get('location', {}).get('detail') or '待确认'}",
+            f"- 资格：{project.get('eligibility', {}).get('restriction_text') or '待确认'}",
+            f"- 经费：{project.get('reimbursement', {}).get('text') or '待确认'}",
+            f"- 报名方式：{project.get('signup_method') or '待确认'}",
+            f"- 待确认字段：{'、'.join(project.get('uncertain_fields', [])) or '无'}",
+        ]
+
+        # 把原文引用摆到对话里。"关键字段可回查原文"是这个产品区别于
+        # 让大模型直接读通知的地方，但此前只有网页端能看到证据，对话里看不见。
+        evidence = project.get("field_evidence") or {}
+        quoted = [
+            (cls._EVIDENCE_LABELS.get(field, field), item.get("quote", "").strip(), item.get("source_location", ""))
+            for field, item in evidence.items()
+            if isinstance(item, dict) and item.get("quote", "").strip()
+        ]
+        if quoted:
+            lines += ["", "**原文依据**（可回查核对）"]
+            for label, quote, where in quoted:
+                suffix = f"（{where}）" if where else ""
+                lines.append(f"- {label}：「{quote}」{suffix}")
+
+        if project.get("demo_data"):
+            lines += ["", "> 这是演示数据，不能作为真实报名依据。"]
+        if project.get("source_url"):
+            lines.append(f"\n原文链接：{project['source_url']}")
+        else:
+            lines.append("\n> 这条记录没有原文链接，报名前请自行核对来源通知。")
+
+        lines.append(
+            "\n接下来可以说：「帮我写这个项目的报名理由」，或者「比较这个和另一个项目名」。"
         )
+        return "\n".join(lines)
 
     def _list_projects(self) -> str:
         projects = [project for project in self.db.list_projects(include_expired=False) if project.get("status") == "published"]
@@ -438,16 +542,28 @@ class PracticeChatAdapter:
         lines.append("\n演示项目均有明确标识，不能作为真实报名依据。告诉我院系、年级、空闲时间、主题、地点和经费偏好，我可以继续筛选。")
         return "\n".join(lines)
 
-    @staticmethod
-    def _welcome() -> str:
+    def _welcome(self) -> str:
+        """能力清单必须和对话里真能做到的事一致。
+
+        原来这里写着"生成……行程"，但行程需要先勾选当地点位和住宿位置，
+        对话里没有那些表单，用户照着问必然扑空。承诺做不到的事比少说一项更伤。
+        """
+        sample = next(
+            (p["title"] for p in self.db.list_projects(include_expired=False)
+             if p.get("status") == "published"),
+            "",
+        )
+        example = f"「帮我写{sample}的报名理由」" if sample else "「帮我写第一个的报名理由」"
         return (
-            "你好，我是**实践小搭**。我可以帮助你：\n\n"
-            "1. 按院系、年级、时间、地点、主题和经费要求推荐社会实践；\n"
-            "2. 核对报名截止、参与资格和报销信息；\n"
-            "3. 比较多个项目；\n"
-            "4. 生成报名陈述、外联话术、访谈提纲、行程和报告框架；\n"
-            "5. 把复制的公众号通知转换为带证据的项目卡。\n\n"
-            "你可以说：‘我是社科学院大三学生，八月有空，推荐有报销的乡村教育实践。’"
+            "你好，我是**实践小搭**。我能做的是：\n\n"
+            "1. 按院系、年级、可用时间、地点、主题和经费要求推荐社会实践，"
+            "并说明每一条推荐和排除的理由；\n"
+            "2. 给出项目的报名截止、资格、报销和报名方式，并附上原文引用供你回查；\n"
+            "3. 逐项比较两个项目；\n"
+            "4. 为指定项目生成报名理由、当地外联话术、访谈提纲和调研报告框架；\n"
+            "5. 把你复制来的公众号招募通知转成带证据的项目卡。\n\n"
+            "行程与路线任务需要先选定当地点位和住宿位置，请在实践小搭的行动工作台里完成。\n\n"
+            f"可以先说：「我大三，八月有空，推荐乡村振兴方向的实践」，再说 {example}。"
         )
 
     def _fallback(self) -> str:

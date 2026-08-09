@@ -16,9 +16,32 @@ cp .env.example .env
 docker compose up --build
 ```
 
-健康检查：`http://127.0.0.1:8000/health`。协议地址是 `http://127.0.0.1:8000/v1`，但本地地址不能填入清小搭；清小搭需要公网 HTTPS 地址。
+健康检查：`http://127.0.0.1:8000/health`。协议地址是 `http://127.0.0.1:8000/v1`。本地地址不能填入清小搭——平台明确要求公网可访问，不接受 localhost 或内网地址；但**不要求 HTTPS**，公网 IP 加端口的 HTTP 地址即可（已实测通过）。
 
-## 3. 推荐公网方案：腾讯云轻量香港 + Docker + Caddy
+## 3. 最省事的公网方案：香港轻量服务器 + systemd（实际在用的方案）
+
+**实测结论：清小搭接受 `http://公网IP:端口/v1`，不要求 HTTPS，也不需要域名。**
+四项自动检测（连通性 / 凭证校验 / 最小对话 / OpenAI 格式）都能通过。所以最短路径是：
+
+1. 买一台**海外或香港地域**的入门 Linux 服务器（免备案；大陆地域要用域名跑 HTTPS 得先备案，时间上通常来不及）。1 核 1G 起步即可——本项目零第三方依赖、不跑模型。
+2. 把仓库内容放到 `/opt/practice-xiaoda`。
+3. 执行安装脚本，它会生成密钥、写好 systemd 单元、设置开机自启与崩溃重启：
+
+```bash
+bash deploy/systemd-install.sh
+```
+
+4. 在云厂商控制台的**防火墙 / 安全组**放行 TCP 8000（最容易漏的一步）。
+5. 取密钥：`sudo grep XIAODA_API_KEY /etc/practice-xiaoda.env`
+6. 清小搭里填 `http://<公网IP>:8000/v1` + 该密钥，鉴权选 Bearer Token。
+
+> 脚本把 `RATE_LIMIT_PER_MINUTE` 设为 600 而非默认的 60。限流按 Bearer token 的指纹分桶，
+> 而清小搭对所有终端用户使用同一个 token——默认值会被全体用户共享，评审期间十几个人
+> 同时对话就会集体收到 429。
+
+需要 HTTPS、自定义域名或容器化时，用下面的方案。
+
+## 4. 备选：域名 + Docker + Caddy 自动 HTTPS
 
 这是本项目的正式部署首选：SQLite 需要稳定磁盘、服务需常驻且主要服务国内学生。选择香港地域可以避免中国大陆网站备案流程，同时通常比欧美区域更适合国内访问。选一台可运行 Docker 的入门 Linux 实例即可；不要为了此 MVP 购买高规格 GPU 或数据库套餐。
 
@@ -36,7 +59,7 @@ docker compose -f compose.yaml -f compose.public.yaml up -d --build
 
 官方入口：[腾讯云 Lighthouse](https://www.tencentcloud.com/products/lighthouse)、[Railway Pricing](https://railway.com/pricing)、[Render Pricing](https://render.com/pricing)。
 
-## 4. Docker 运行
+## 5. Docker 运行
 
 ```bash
 docker build -t practice-xiaoda .
@@ -47,7 +70,7 @@ docker run --rm -p 8000:8000 \\
 
 SQLite 文件位于 `/data/practice_xiaoda.db`，公网部署必须绑定持久卷，否则重启会丢失导入和审核数据。
 
-## 5. Railway / Render
+## 6. Railway / Render
 
 仓库已经包含 `railway.json`、`render.yaml` 和 `Dockerfile`。创建服务后设置：
 
@@ -59,10 +82,10 @@ SQLite 文件位于 `/data/practice_xiaoda.db`，公网部署必须绑定持久�
 
 Render 必须启用持久磁盘并挂载到 `/data`；Railway 也要添加 Volume 挂载 `/data`。平台自带 HTTPS 域名可直接用于清小搭；不要把管理面板公开。
 
-## 6. 清小搭向导填写
+## 7. 清小搭向导填写
 
 1. 选择“标准协议接入”。
-2. API 地址填到版本段：`https://你的公网域名/v1`（不要再填 `/chat/completions`）。
+2. API 地址填到版本段：`http://公网IP:8000/v1` 或 `https://你的公网域名/v1`（不要再填 `/chat/completions`）。
 3. API 密钥填 `XIAODA_API_KEY`，鉴权选择 `Bearer Token`。
 4. 流式终止符填 `[DONE]`，usage 位置选“stop 帧内”。
 5. 能力声明只勾选流式；当前版本不勾选视觉和工具。
@@ -70,7 +93,7 @@ Render 必须启用持久磁盘并挂载到 `/data`；Railway 也要添加 Volum
 
 探测对应：`GET /v1/models`、`POST /v1/chat/completions`；错误密钥返回 401，`stream` 必须是 JSON 布尔值，`model` 缺失、空或 null 均可，SSE 顺序为 role → content* → stop(含 usage) → `[DONE]`。
 
-## 7. 运维与安全
+## 8. 运维与安全
 
 - 只通过 HTTPS 暴露服务；定期轮换 `XIAODA_API_KEY`。
 - 生产模式下管理 API 还需要 `ADMIN_API_KEY`，且管理面板默认关闭。
