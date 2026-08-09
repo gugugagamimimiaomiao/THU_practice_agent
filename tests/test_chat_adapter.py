@@ -1,12 +1,16 @@
 import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from chat_adapter import (
     ChatRequestError,
+    PracticeChatAdapter,
     completion_payload,
     stream_events,
     validate_chat_request,
 )
+from database import Database
 
 
 class ChatAdapterProtocolTests(unittest.TestCase):
@@ -69,6 +73,66 @@ class ChatAdapterProtocolTests(unittest.TestCase):
         self.assertEqual(stop["choices"][0]["delta"], {})
         self.assertEqual(stop["choices"][0]["finish_reason"], "stop")
         self.assertEqual(set(stop["usage"]), {"prompt_tokens", "completion_tokens", "total_tokens"})
+
+
+class ChatIntentTests(unittest.TestCase):
+    """守住那些"用户照着帮助文案说话却被兜底"的说法。
+
+    这些用例全部来自在清小搭上线前的实测：协议层一直是对的，坏的是意图匹配
+    太窄——同一个意图换个常用词就掉进兜底菜单。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.adapter = PracticeChatAdapter(Database(Path(self.tmp.name) / "chat.db"))
+        self.project = next(
+            p for p in self.adapter.db.list_projects() if p["status"] == "published"
+        )
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def reply(self, text):
+        return self.adapter.reply([{"role": "user", "content": text}])
+
+    def test_generation_accepts_the_wording_used_in_the_docs(self):
+        # README 和网页 UI 写的是"报名陈述"，实现里原本只认"报名理由"。
+        for phrase in ("报名理由", "报名陈述", "个人陈述", "申请材料"):
+            with self.subTest(phrase=phrase):
+                result = self.reply(f"为{self.project['title']}生成{phrase}")
+                self.assertEqual(result.intent, "generate_application")
+
+    def test_bare_project_name_returns_the_project_card(self):
+        # 兜底文案自己写着"查询项目：说出项目名称"，照做必须有结果。
+        result = self.reply(self.project["title"])
+        self.assertEqual(result.intent, "project_detail")
+        self.assertEqual(result.project_id, self.project["id"])
+
+    def test_open_ended_questions_do_not_hit_the_fallback(self):
+        for phrase in ("哪些项目有报销？", "最近哪个项目快截止了？", "还有哪些实践机会？"):
+            with self.subTest(phrase=phrase):
+                self.assertNotEqual(self.reply(phrase).intent, "fallback")
+
+    def test_short_pasted_notice_is_imported(self):
+        result = self.reply(
+            "导入这则通知：浙江数字乡村调研支队招募。报名截止：2026年9月20日。"
+            "面向全校本科生。地点：浙江杭州。"
+        )
+        self.assertEqual(result.intent, "import")
+        # 前缀"导入这则通知："必须被剥掉，否则它会变成项目标题。
+        self.assertNotIn("这则通知", result.content)
+        self.assertIn("浙江数字乡村调研支队招募", result.content)
+
+    def test_itinerary_without_sites_explains_instead_of_erroring(self):
+        # 以前这里会抛异常，清小搭那侧直接显示成"对话失败"。
+        result = self.reply(f"为{self.project['title']}生成行程")
+        self.assertEqual(result.intent, "generate_itinerary_needs_sites")
+        self.assertIn("行动工作台", result.content)
+
+    def test_fallback_still_offers_something_useful(self):
+        result = self.reply("今天北京天气怎么样")
+        self.assertEqual(result.intent, "fallback")
+        self.assertIn("现在还能报名的项目", result.content)
 
 
 if __name__ == "__main__":

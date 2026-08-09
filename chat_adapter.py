@@ -168,6 +168,27 @@ def openai_error(message: str, *, error_type: str = "invalid_request_error", par
     return {"error": {"message": message, "type": error_type, "param": param, "code": code}}
 
 
+# 意图关键词集中在这里，方便随时补同义词。
+# 教训：产品文档、网页 UI 和这里曾经各用各的词——README 写"报名陈述"，
+# 而这里只认"报名理由"，用户照着文档说话反而失败。新增说法时三处要对齐。
+GENERATE_WORDS = (
+    "访谈", "外联", "联系话术", "沟通话术", "行程", "日程",
+    "报告框架", "报告大纲", "调研报告",
+    "报名理由", "申请理由", "报名材料", "申请材料", "个人陈述",
+    "报名陈述", "自荐", "报名文书", "怎么写", "帮我写",
+)
+RECOMMEND_WORDS = (
+    "推荐", "适合我", "找项目", "匹配", "有什么项目", "有哪些项目", "筛选",
+    "有报销", "能报销", "可以报销", "有经费", "报销的",
+    "还能报名", "还可以报名", "能报的", "报什么",
+)
+DETAIL_WORDS = ("详情", "介绍", "资格", "截止", "报销", "地点", "时间", "这个项目", "怎么样", "什么条件")
+LIST_WORDS = (
+    "项目列表", "全部项目", "近期项目", "实践机会", "有哪些", "还有哪些",
+    "快截止", "最近截止", "都有什么",
+)
+
+
 class PracticeChatAdapter:
     def __init__(self, database: Database) -> None:
         self.db = database
@@ -180,31 +201,57 @@ class PracticeChatAdapter:
 
         if self._is_import(latest):
             return self._import_notice(latest)
-        if any(word in latest for word in ["访谈", "报名理由", "申请理由", "报名材料", "个人陈述", "外联", "联系话术", "沟通话术", "行程", "日程", "报告框架", "报告大纲"]):
+        if any(word in latest for word in GENERATE_WORDS):
             return self._generate(messages, all_user_text, latest)
-        if any(word in latest for word in ["比较", "对比", "哪个好", "区别"]):
+        if any(word in latest for word in ["比较", "对比", "哪个好", "区别", "选哪个"]):
             return self._compare(messages, all_user_text)
-        if any(word in latest for word in ["推荐", "适合我", "找项目", "匹配", "有什么项目", "筛选"]):
+        if any(word in latest for word in RECOMMEND_WORDS):
             return self._recommend(all_user_text)
         project = self._resolve_project(messages, latest)
-        if project and any(word in latest for word in ["详情", "介绍", "资格", "截止", "报销", "地点", "时间", "这个项目"]):
+        if project and any(word in latest for word in DETAIL_WORDS):
             return ChatResult(self._project_detail(project), "project_detail", project["id"])
         if any(word in normalized for word in ["hello", "hi"]) or any(word in latest for word in ["你好", "您好", "你是谁", "怎么用", "帮助", "能做什么"]):
             return ChatResult(self._welcome(), "help")
-        if any(word in latest for word in ["项目列表", "全部项目", "近期项目", "实践机会"]):
+        if any(word in latest for word in LIST_WORDS):
             return ChatResult(self._list_projects(), "list_projects")
+        # 只说了项目名（没带其它意图词）时，直接给项目卡而不是兜底菜单——
+        # 兜底话术里本来就写着"查询项目：说出项目名称"，照做却掉进兜底是自相矛盾。
+        # 这里只认最新一句里的项目名，不翻历史，避免话题转开后仍然返回旧项目。
+        named = self._resolve_project(messages, latest, latest_only=True)
+        if named:
+            return ChatResult(self._project_detail(named), "project_detail", named["id"])
         return ChatResult(self._fallback(), "fallback")
 
     @staticmethod
     def _is_import(text: str) -> bool:
-        command = any(word in text[:80] for word in ["导入", "收录", "录入", "解析这篇", "提取项目卡"])
-        notice_signal = sum(word in text for word in ["报名截止", "实践时间", "招募对象", "报名方式", "主办单位"])
-        return command and (len(text) >= 100 or notice_signal >= 2)
+        # 判据放宽过一次：原来要求正文 ≥100 字或命中 ≥2 个信号词，
+        # 结果照着帮助文案说「导入这则通知：……」贴一段短通知反而不触发。
+        # 命令词本身已经足够明确，配合任意一个招募信号词即可。
+        command = any(word in text[:80] for word in ["导入", "收录", "录入", "解析这篇", "提取项目卡", "存进来"])
+        notice_signal = sum(
+            word in text
+            for word in ["报名截止", "截止", "实践时间", "招募", "报名方式", "主办", "面向", "地点", "联系"]
+        )
+        return command and (len(text) >= 40 or notice_signal >= 1)
 
     def _import_notice(self, text: str) -> ChatResult:
         url_match = re.search(r"https?://[^\s，。]+", text)
         source_url = url_match.group(0).rstrip(")]）") if url_match else ""
-        raw_text = re.sub(r"^(请)?(?:帮我)?(?:导入|收录|录入|解析这篇|提取项目卡)[：:\s]*", "", text, count=1)
+        # 把「导入这则通知：」「帮我录入下面这条招募：」这类前缀整段剥掉。
+        # 只剥"导入"两个字的话，剩下的"这则通知：……"会被当成项目标题。
+        raw_text = re.sub(
+            r"^(?:请)?(?:帮我)?(?:把)?(?:导入|收录|录入|解析这篇|提取项目卡|存进来)"
+            r"(?:下面)?(?:这[则条篇个份])?(?:通知|文章|推送|招募|信息)?"
+            r"[：:，,\s]*",
+            "",
+            text,
+            count=1,
+        )
+        # 从微信复制到对话框时换行经常会丢，整篇通知挤成一行。抽取逻辑是按行走的，
+        # 这种情况下标题会把整段吃进去、地点也跟着串行。这里按句号补回换行，
+        # 只在确实没有换行时才做，避免影响正常粘贴的多行正文。
+        if "\n" not in raw_text and len(raw_text) > 40:
+            raw_text = re.sub(r"(?<=[。！？；])(?=[^\s])", "\n", raw_text)
         article_id = self.db.insert_article({
             "input_type": "copied_text",
             "source_account": "清小搭对话导入",
@@ -289,11 +336,15 @@ class PracticeChatAdapter:
         lines.append("\n你可以继续说“比较前两个项目”或“为滇西乡村教育数字化调研生成报名理由”。")
         return ChatResult("\n".join(lines), "recommend")
 
-    def _resolve_project(self, messages: list[dict[str, Any]], latest: str) -> dict[str, Any] | None:
+    def _resolve_project(
+        self, messages: list[dict[str, Any]], latest: str, *, latest_only: bool = False
+    ) -> dict[str, Any] | None:
         projects = self.db.list_projects(include_expired=True)
         direct = [project for project in projects if project["title"] in latest or project["id"] in latest]
         if direct:
             return direct[0]
+        if latest_only:
+            return None
         conversation = "\n".join(item["content"] for item in messages)
         mentioned = [project for project in projects if project["title"] in conversation or project["id"] in conversation]
         if mentioned:
@@ -319,7 +370,24 @@ class PracticeChatAdapter:
                 "generate_needs_project",
             )
         profile = self._extract_profile(all_user_text)
-        result = generate_asset(project, kind, {"department": profile.get("department", "")})
+        try:
+            result = generate_asset(project, kind, {"department": profile.get("department", "")})
+        except ValueError as exc:
+            # 行程/路线任务需要先在行动工作台里勾选当地点位和填写住宿位置，
+            # 而对话里没有这些表单。以前这里会把异常抛成 API 错误，清小搭那边
+            # 直接显示成"对话失败"；改为在对话里说清楚缺什么、去哪补。
+            if kind == "itinerary":
+                return ChatResult(
+                    f"「{project['title']}」的行程任务表需要先确定当地要去的点位和住宿位置，"
+                    "这两项在对话里没法勾选，也不该由我替你猜——路线一旦编错，"
+                    "会直接影响你的实地安排。\n\n"
+                    "请先在实践小搭的「行动工作台」里选好点位并填写住宿位置，再生成行程。\n\n"
+                    f"我现在可以直接帮你出这个项目的：访谈提纲、当地外联话术、报名理由或调研报告框架——说一声就行。\n\n"
+                    f"> 原因：{exc}",
+                    "generate_itinerary_needs_sites",
+                    project["id"],
+                )
+            return ChatResult(f"这份材料暂时生成不了：{exc}", f"generate_{kind}_failed", project["id"])
         warnings = "\n\n> 注意：" + "；".join(result["warnings"]) if result["warnings"] else ""
         return ChatResult(result["content"] + warnings, f"generate_{kind}", project["id"])
 
@@ -382,13 +450,30 @@ class PracticeChatAdapter:
             "你可以说：‘我是社科学院大三学生，八月有空，推荐有报销的乡村教育实践。’"
         )
 
-    @staticmethod
-    def _fallback() -> str:
-        return (
-            "我目前专注于清华社会实践机会。请告诉我你想完成哪一项：\n\n"
-            "- 推荐项目：提供院系、年级、时间、地点、主题和经费偏好；\n"
-            "- 查询项目：说出项目名称；\n"
-            "- 比较项目：提供两个项目名称；\n"
-            "- 生成材料：先指定项目，再说明要报名、外联、访谈、行程或报告；\n"
-            "- 导入通知：粘贴完整招募正文并说‘导入这则通知’。"
-        )
+    def _fallback(self) -> str:
+        """没听懂时也给点有用的东西，而不是重复同一段菜单。
+
+        连着掉进兜底两次、每次一字不差，比答不上来更伤体验；顺手把当前还能
+        报名的项目列出来，用户至少不会空手离开。
+        """
+        openings = [
+            project for project in self.db.list_projects(include_expired=False)
+            if project.get("status") == "published"
+        ][:3]
+        lines = ["这句我没接住。我能帮的是清华社会实践这一块，比如："]
+        if openings:
+            lines.append("")
+            lines.append("**现在还能报名的项目**")
+            for project in openings:
+                lines.append(
+                    f"- {project['title']}｜截止 {project.get('signup_deadline') or '待确认'}"
+                )
+        lines.extend([
+            "",
+            "**你可以直接说**",
+            "- 「我大三，八月有空，推荐乡村振兴方向的实践」——按你的条件筛，并说明推荐和排除的理由",
+            "- 直接说出上面任一个项目名——看它的时间、资格、报销和报名方式",
+            "- 「比较前两个推荐项目」——逐项对比",
+            "- 「帮我写第一个的报名理由」——生成报名材料填写建议，也可以换成外联话术、访谈提纲、报告框架",
+        ])
+        return "\n".join(lines)
