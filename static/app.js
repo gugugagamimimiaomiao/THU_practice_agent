@@ -638,14 +638,35 @@ function saveProfile(profile) {
   $("#profileSaved").textContent = "已在本机保存";
 }
 
+// 默认可用时间必须跟着"今天"走。写死日期会随时间推移把所有项目判成时间冲突，
+// 首次打开推荐页就只剩零星几条结果，看起来像匹配功能坏了。
+function defaultAvailability() {
+  const iso = (offsetDays) => {
+    const d = new Date();
+    d.setDate(d.getDate() + offsetDays);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  };
+  return { start: iso(0), end: iso(60) };
+}
+
+function applyDefaultAvailability() {
+  const { start, end } = defaultAvailability();
+  if (!$("#availableStart").value) $("#availableStart").value = start;
+  if (!$("#availableEnd").value) $("#availableEnd").value = end;
+}
+
 function restoreProfile() {
   let profile = null;
   try { profile = JSON.parse(localStorage.getItem("practice-xiaoda-profile")); } catch (_) {}
-  if (!profile) return;
+  if (!profile) { applyDefaultAvailability(); return; }
+  const fallback = defaultAvailability();
+  // 本机存过的可用时间可能已经整段过期（换了学期、或存的是旧版本的默认值）。
+  // 这种情况下继续沿用会把所有项目判成时间冲突，所以退回到以今天为准的默认值。
+  const stale = !profile.available_end || profile.available_end < fallback.start;
   $("#profileDepartment").value = profile.department || "";
   $("#profileGrade").value = profile.grade || "";
-  $("#availableStart").value = profile.available_start || "2026-08-01";
-  $("#availableEnd").value = profile.available_end || "2026-08-25";
+  $("#availableStart").value = stale ? fallback.start : (profile.available_start || fallback.start);
+  $("#availableEnd").value = stale ? fallback.end : profile.available_end;
   $("#reimbursementPreference").value = profile.reimbursement_preference || "not_important";
   $$('input[name="themes"]').forEach((el) => { el.checked = (profile.themes || []).includes(el.value); });
   $$('input[name="locations"]').forEach((el) => { el.checked = (profile.preferred_locations || []).includes(el.value); });

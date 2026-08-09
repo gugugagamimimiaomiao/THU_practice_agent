@@ -218,7 +218,7 @@
                   <label><span>院系</span><input id="profileDepartment" placeholder="例如：社科学院"></label>
                   <label><span>年级 / 培养层次</span><select id="profileGrade"><option value="">不限</option><option>大一</option><option>大二</option><option>大三</option><option>大四</option><option>硕士生</option><option>博士生</option></select></label>
                 </div>
-                <div class="form-row two"><label><span>可用开始日期</span><input id="availableStart" type="date" value="2026-08-01"></label><label><span>可用结束日期</span><input id="availableEnd" type="date" value="2026-08-25"></label></div>
+                <div class="form-row two"><label><span>可用开始日期</span><input id="availableStart" type="date"></label><label><span>可用结束日期</span><input id="availableEnd" type="date"></label></div>
                 <fieldset><legend>感兴趣的主题</legend><div class="chip-checks" id="themeChecks"></div></fieldset>
                 <fieldset><legend>偏好地点</legend><div class="chip-checks compact"><label><input type="checkbox" name="locations" value="北京"><span>北京</span></label><label><input type="checkbox" name="locations" value="云南"><span>云南</span></label><label><input type="checkbox" name="locations" value="青海"><span>青海</span></label><label><input type="checkbox" name="locations" value="福建"><span>福建</span></label><label><input type="checkbox" name="locations" value="线上"><span>线上/混合</span></label></div></fieldset>
                 <label><span>经费偏好</span><select id="reimbursementPreference"><option value="not_important">不作为主要条件</option><option value="preferred">优先选择有报销/补贴</option><option value="required">必须明确有报销/补贴</option></select></label>
@@ -280,7 +280,9 @@
             <section class="panel output-panel">
               <div class="output-toolbar"><div><span class="section-label">DRAFT</span><h3 id="outputTitle">报名材料草稿</h3></div><div><button class="icon-button" id="copyOutput" title="复制" disabled>□</button><button class="secondary-button small" id="downloadOutput" disabled>下载 .md</button></div></div>
               <div id="outputWarnings" class="output-warnings hidden"></div>
-              <pre id="generatedOutput" class="generated-output">选择项目并填写真实信息，然后生成草稿。\n\n所有对外发送或提交的内容，都应由你最后检查确认。</pre>
+              <pre id="generatedOutput" class="generated-output">选择项目并填写真实信息，然后生成草稿。
+
+所有对外发送或提交的内容，都应由你最后检查确认。</pre>
               <div class="feedback-strip hidden" id="feedbackStrip"><span>这个草稿有帮助吗？</span><button data-rating="5">很有帮助</button><button data-rating="3">还需修改</button></div>
             </section>
           </div>
