@@ -5,7 +5,12 @@ import threading
 import time
 import unittest
 from urllib.error import HTTPError
-from urllib.request import Request, urlopen
+from urllib.request import ProxyHandler, Request, build_opener
+
+# 开发机上常见的本地代理（Clash / v2ray 等）会被 urllib 自动读取，
+# 连发往 127.0.0.1 的测试请求也会被转发出去并返回 502。
+# 这里显式使用空代理的 opener，让测试只依赖本进程启动的回环服务。
+_DIRECT = build_opener(ProxyHandler({}))
 
 import server as app_server
 from chat_adapter import PracticeChatAdapter
@@ -54,7 +59,7 @@ class ServerProtocolTests(unittest.TestCase):
         request = Request(f"http://127.0.0.1:{self.port}{path}", data=data, method=method, headers=headers)
         started = time.monotonic()
         try:
-            response = urlopen(request, timeout=5)
+            response = _DIRECT.open(request, timeout=5)
             body = response.read()
             return response.status, dict(response.headers), body, time.monotonic() - started
         except HTTPError as exc:

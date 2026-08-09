@@ -1,3 +1,4 @@
+import os
 import stat
 import tempfile
 import unittest
@@ -29,8 +30,13 @@ class CollectorSettingsTests(unittest.TestCase):
         self.assertTrue(status["credential_configured"])
         self.assertNotIn("cookie-not-for-public-output", str(status))
         self.assertEqual(collector_settings.credentials(), ("not-for-public-output", "cookie-not-for-public-output"))
-        mode = stat.S_IMODE(collector_settings.SETTINGS_PATH.stat().st_mode)
-        self.assertEqual(mode, 0o600)
+        # POSIX 权限位只在类 Unix 系统上有意义。Windows 的 os.chmod 只能切换只读位，
+        # NTFS 上文件会保持 0o666，因此这里不能断言 0o600。
+        # 注意这不是测试放水：在 Windows 上开发时，凭据文件确实没有 0o600 保护，
+        # 真实部署（Docker/Linux）才有。开发机上请不要长期存放真实 Token/Cookie。
+        if os.name == "posix":
+            mode = stat.S_IMODE(collector_settings.SETTINGS_PATH.stat().st_mode)
+            self.assertEqual(mode, 0o600)
 
     def test_clear_credentials_disables_daily_job(self):
         collector_settings.save_from_developer({"replace_credentials": True, "token": "t", "cookie": "c", "enabled": True})

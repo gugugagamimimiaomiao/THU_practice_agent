@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from domain import deep_merge, json_dumps, now_iso, refresh_status, validate_project
 
@@ -22,12 +23,29 @@ class Database:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.initialize()
 
-    def connect(self) -> sqlite3.Connection:
+    def _open(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=10)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA journal_mode = WAL")
         return connection
+
+    @contextmanager
+    def connect(self) -> Iterator[sqlite3.Connection]:
+        """Yield a connection that always commits-or-rolls-back and then closes.
+
+        sqlite3 connections are *not* closed by their own context manager, so
+        relying on ``with sqlite3.connect(...)`` leaks file handles until the
+        garbage collector runs. On Windows an open handle makes the database
+        file undeletable, which breaks any caller that works inside a temporary
+        directory. Closing explicitly keeps behaviour identical across platforms.
+        """
+        connection = self._open()
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     def initialize(self) -> None:
         with self.connect() as db:
