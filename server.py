@@ -484,6 +484,18 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+class PracticeHTTPServer(ThreadingHTTPServer):
+    """把 listen backlog 从标准库默认的 5 提高到 128。
+
+    压测发现：并发 60 时约四分之一的连接直接被内核 reset（ConnectionReset），
+    与业务代码无关——只是等待队列太浅，握手阶段就被丢弃。评审期间如果一个班
+    同时点开智能体，就会撞上这个。128 对应常见的 SOMAXCONN，内存代价可忽略。
+    """
+
+    request_queue_size = 128
+    daemon_threads = True
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="运行实践小搭 MVP")
     parser.add_argument("--host", default=os.getenv("HOST", "127.0.0.1"))
@@ -495,7 +507,7 @@ def main() -> None:
         help="收到停止信号后，留给进行中的请求写完响应的时间",
     )
     args = parser.parse_args()
-    server = ThreadingHTTPServer((args.host, args.port), Handler)
+    server = PracticeHTTPServer((args.host, args.port), Handler)
     SCHEDULER.start()
     print(f"实践小搭已启动：http://{args.host}:{args.port}")
     print("按 Ctrl+C 停止服务")
