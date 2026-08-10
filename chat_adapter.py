@@ -615,7 +615,9 @@ class PracticeChatAdapter:
                 project["id"],
             )
 
-        header = f"# {project['title']}｜推送文案草稿\n\n"
+        # 故意不用 H1：模型会自己写一个标题，两个 H1 叠在一起很难看。
+        # 这一行只是标明这是草稿、绑定到哪个项目。
+        header = f"> 为「{project['title']}」起草的推送文案，项目事实来自已核验的项目卡。\n\n"
         user_prompt = f"【项目事实】\n{facts}\n\n请据此写推送文案。"
 
         def produce() -> Iterable[str]:
