@@ -29,6 +29,8 @@ const statusMeta = {
   rejected: ["已拒绝", "expired"],
 };
 
+// 与 domain.py 的 FIELD_LABELS 保持一致：这些字段名会直接显示给学生看，
+// 漏掉一个就会在页面上冒出 contact、quota 这种英文。
 const fieldLabels = {
   signup_deadline: "报名截止",
   practice_dates: "实践日期",
@@ -38,6 +40,9 @@ const fieldLabels = {
   source_url: "原文链接",
   location: "实践地点",
   organizer: "主办单位",
+  contact: "联系方式",
+  quota: "招募人数",
+  required_materials: "报名材料",
 };
 
 const kindTitles = {

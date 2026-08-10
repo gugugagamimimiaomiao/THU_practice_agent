@@ -10,9 +10,14 @@
 - `POST /v1/chat/completions` 接受 `messages`、布尔 `stream`、可选 `model` 与 `max_tokens`。
 - 非流式响应含 `choices[0].message.content` 与 `usage`。
 - 流式响应严格为 role 首帧、content 增量帧、stop（含 usage）帧，最后 `data: [DONE]`。
+- `max_tokens` 会真正生效：超出上限时按 token 截断，`finish_reason` 为 `length`（未截断时为 `stop`），`usage.completion_tokens` 与截断结果一致。传入非整数、0 或负数返回 400。
 - 当前明确不支持图片输入；请先提交 OCR 文本。
 
-清小搭中 `baseUrl` 填 `https://你的域名/v1`，鉴权选择 Bearer Token，终止符 `[DONE]`，usage 位置选择 stop 帧内。
+清小搭中 `baseUrl` 填到版本段，鉴权选择 Bearer Token，终止符 `[DONE]`，usage 位置选择 stop 帧内。
+
+> **地址不要求 HTTPS。** 平台只要求公网可访问（不能是 localhost 或内网），
+> `http://公网IP:8000/v1` 即可通过全部四项检测——连通性、凭证校验、最小对话、
+> OpenAI 格式校验。有域名和证书当然更好，但不是前置条件。
 
 ## 导入
 

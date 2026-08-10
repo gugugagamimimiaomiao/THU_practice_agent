@@ -95,6 +95,55 @@ EOF
   systemctl enable --now practice-xiaoda-health.timer >/dev/null 2>&1 || true
 fi
 
+# --- 每日备份 -----------------------------------------------------------
+# 爬虫接上之后库里是人工核验过的真实项目，重建成本远高于这点磁盘。
+# 用 sqlite3 的 backup API 而不是 cp：服务常驻、随时在写，直接复制可能拷到
+# 写了一半的状态，等要恢复时才发现备份本身是坏的。
+if [ -f "$APP_DIR/deploy/backup.py" ]; then
+  cat > /etc/systemd/system/practice-xiaoda-backup.service <<EOF
+[Unit]
+Description=Practice Xiaoda database backup
+
+[Service]
+Type=oneshot
+EnvironmentFile=$ENV_FILE
+ExecStart=/usr/bin/python3 $APP_DIR/deploy/backup.py
+StandardOutput=append:/var/log/practice-xiaoda-backup.log
+StandardError=append:/var/log/practice-xiaoda-backup.log
+EOF
+  cat > /etc/systemd/system/practice-xiaoda-backup.timer <<'EOF'
+[Unit]
+Description=Back up the Practice Xiaoda database daily
+
+[Timer]
+OnCalendar=*-*-* 04:30:00
+Persistent=true
+AccuracySec=5min
+
+[Install]
+WantedBy=timers.target
+EOF
+  systemctl daemon-reload
+  systemctl enable --now practice-xiaoda-backup.timer >/dev/null 2>&1 || true
+  # 装完先备一次，别等到明天凌晨才有第一份。
+  systemctl start practice-xiaoda-backup >/dev/null 2>&1 || true
+fi
+
+# --- 日志轮转 -----------------------------------------------------------
+# 健康自检每分钟一条，一天一千四百多行；磁盘写满时 SQLite 会以很难看懂的
+# 方式报错，与其事后排查不如提前压住。
+cat > /etc/logrotate.d/practice-xiaoda <<'EOF'
+/var/log/practice-xiaoda*.log {
+    weekly
+    rotate 6
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}
+EOF
+
 systemctl daemon-reload
 systemctl enable practice-xiaoda >/dev/null 2>&1 || true
 systemctl restart practice-xiaoda
