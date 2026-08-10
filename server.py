@@ -11,7 +11,10 @@ import json
 import mimetypes
 import os
 import re
+import signal
 import sys
+import threading
+import time
 import traceback
 import uuid
 from http import HTTPStatus
@@ -28,7 +31,9 @@ from chat_adapter import (
     completion_payload,
     model_list,
     openai_error,
+    resolve_max_tokens,
     stream_events,
+    truncate_to_tokens,
     validate_chat_request,
 )
 from security import (
@@ -275,10 +280,18 @@ class Handler(BaseHTTPRequestHandler):
             payload = self.read_json()
             try:
                 messages, stream, model = validate_chat_request(payload)
+                max_tokens = resolve_max_tokens(payload)
             except ChatRequestError as exc:
                 raise OpenAIAPIError(400, str(exc), param=exc.param, code=exc.code)
             result = CHAT.reply(messages)
-            DB.log("chat", f"完成清小搭对话：{result.intent}", {"intent": result.intent, "project_id": result.project_id})
+            # 记录 max_tokens：正常对话本不该带它。若平台网关某天开始下发一个
+            # 默认上限，回复会被静默截断，这条日志能让我们立刻看出来，
+            # 而不是等用户反馈"话说一半"。
+            note = {"intent": result.intent, "project_id": result.project_id}
+            if max_tokens is not None:
+                note["max_tokens"] = max_tokens
+                note["truncated"] = truncate_to_tokens(result.content, max_tokens)[1]
+            DB.log("chat", f"完成清小搭对话：{result.intent}", note)
             if stream:
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -287,12 +300,12 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("X-Accel-Buffering", "no")
                 self.send_header("X-Request-ID", self.request_id)
                 self.end_headers()
-                for event in stream_events(messages, result.content, model):
+                for event in stream_events(messages, result.content, model, max_tokens=max_tokens):
                     self.wfile.write(event.encode("utf-8"))
                     self.wfile.flush()
                 self.close_connection = True
                 return
-            self.json_response(completion_payload(messages, result.content, model))
+            self.json_response(completion_payload(messages, result.content, model, max_tokens=max_tokens))
             return
         self.require_admin_auth()
         payload = self.read_json()
@@ -475,16 +488,40 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="运行实践小搭 MVP")
     parser.add_argument("--host", default=os.getenv("HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.getenv("PORT", "8765")))
+    parser.add_argument(
+        "--grace-seconds",
+        type=float,
+        default=float(os.getenv("SHUTDOWN_GRACE_SECONDS", "3")),
+        help="收到停止信号后，留给进行中的请求写完响应的时间",
+    )
     args = parser.parse_args()
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     SCHEDULER.start()
     print(f"实践小搭已启动：http://{args.host}:{args.port}")
     print("按 Ctrl+C 停止服务")
+
+    # 收到 SIGTERM（systemctl restart / stop 就是发这个）时先停止接受新连接，
+    # 再给正在写响应的线程一小段时间收尾。默认的 daemon 线程会被直接砍断，
+    # 用户那边就是"话说到一半没了"——重新部署时正好在对话的人会撞上。
+    # 这里只做有界的优雅退出：不等待空闲的 keep-alive 连接，避免停机卡住。
+    def request_stop(signum: int, _frame: Any) -> None:
+        print(f"收到信号 {signum}，停止接受新连接，最多再等 {args.grace_seconds} 秒让进行中的请求收尾")
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, request_stop)
+        except (ValueError, AttributeError):  # 非主线程或该平台没有此信号
+            pass
+
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        deadline = time.monotonic() + max(0.0, args.grace_seconds)
+        while time.monotonic() < deadline and threading.active_count() > 2:
+            time.sleep(0.05)
         SCHEDULER.stop()
         server.server_close()
 

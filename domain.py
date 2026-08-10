@@ -185,7 +185,10 @@ def _extract_title(lines: list[str], supplied: str) -> str:
     if supplied.strip():
         return supplied.strip()[:160]
     for line in lines:
-        candidate = re.sub(r"^[#【\[\s]+|[】\]\s]+$", "", line).strip()
+        # 公众号标题常带【招募】【通知】这类前缀标签，先整段剥掉；
+        # 只剥开头的一个短标签，避免误伤标题里本来就有的方括号内容。
+        candidate = re.sub(r"^\s*[【\[][^】\]]{0,8}[】\]]\s*", "", line)
+        candidate = re.sub(r"^[#【\[\s]+|[】\]\s]+$", "", candidate).strip()
         if 4 <= len(candidate) <= 80 and not any(x in candidate for x in ["来源：", "公众号：", "发布时间："]):
             return candidate
     return "未命名社会实践项目"
@@ -275,12 +278,60 @@ def _extract_materials(text: str) -> list[str]:
     return [name for name, keywords in mapping.items() if any(keyword in text for keyword in keywords)]
 
 
+# 招募通知里常见的字段标签。用于把"标签独占一行、值在下一行"的排版合并起来。
+_NOTICE_FIELD_LABELS = frozenset({
+    "报名截止", "截止时间", "报名截至", "申报截止", "报名时间", "截止日期",
+    "实践时间", "活动时间", "项目时间", "实践日期", "行程时间",
+    "实践地点", "活动地点", "项目地点", "调研地点", "地点",
+    "招募对象", "面向对象", "报名对象", "参与对象", "招募要求", "报名要求",
+    "报名条件", "申请条件", "招募人数",
+    "报名方式", "报名链接", "申请方式", "报名流程",
+    "经费", "经费说明", "费用说明", "报销", "报销说明", "补贴",
+    "主办单位", "组织单位", "承办单位", "项目方", "发起单位",
+    "联系人", "联系方式", "咨询方式",
+})
+
+# 序号前缀：「一、」「（二）」「3.」等。必须带分隔符，否则会把「2026年…」的年份吃掉。
+_NOTICE_ORDINAL = re.compile(r"^\s*(?:[（(]?[一二三四五六七八九十]{1,3}[)）]?[、.．]|\d{1,2}[、.．)])\s*")
+
+
+def _normalize_notice_lines(lines: list[str]) -> list[str]:
+    """把公众号排版整理成「标签：值」一行一条，便于后续按行抽取。
+
+    两种排版此前会整片抽错：
+    1. 标签独占一行、值在下一行 —— 这是最标准的通知写法：
+       「五、报名截止」换行「2026年9月1日18:00」。抽取器只在同一行找值，
+       结果截止日期抽不到，「二、实践地点」这行小标题反而被当成了地点。
+    2. 要素挤在一行、用 | 或 ｜ 分隔 —— 微信里很常见，整行会被吞进某个字段。
+
+    只重写"整行就是一个标签"的行，其余原样保留，尽量缩小影响面。
+    """
+    expanded: list[str] = []
+    for line in lines:
+        parts = [part.strip() for part in re.split(r"[|｜丨]", line) if part.strip()]
+        expanded.extend(parts or [line])
+
+    merged: list[str] = []
+    index = 0
+    while index < len(expanded):
+        current = expanded[index]
+        bare = _NOTICE_ORDINAL.sub("", current).strip().rstrip("：: ")
+        if bare in _NOTICE_FIELD_LABELS and index + 1 < len(expanded):
+            merged.append(f"{bare}：{expanded[index + 1].strip()}")
+            index += 2
+            continue
+        merged.append(current)
+        index += 1
+    return merged
+
+
 def extract_project(raw_text: str, metadata: dict[str, Any] | None = None, *, today: date | None = None) -> dict[str, Any]:
     """Extract a conservative project card from copied text or OCR text."""
     metadata = metadata or {}
     today = today or date.today()
     cleaned = raw_text.replace("\r\n", "\n").replace("\r", "\n").strip()
     lines = [re.sub(r"\s+", " ", line).strip() for line in cleaned.split("\n") if line.strip()]
+    lines = _normalize_notice_lines(lines)
     input_type = metadata.get("input_type", "copied_text")
     title = _extract_title(lines, metadata.get("title", ""))
     source_account = metadata.get("source_account", "用户投稿").strip() or "用户投稿"

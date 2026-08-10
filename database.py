@@ -156,6 +156,11 @@ class Database:
         self.seed_if_empty()
 
     def seed_if_empty(self) -> None:
+        # 换成真实数据之后，把演示项目删干净再重启，本方法会把它们又灌回来——
+        # 因为判据只看"表是不是空的"。生产环境用 SEED_DEMO_DATA=false 关掉，
+        # 免得真实项目库里混进演示条目。
+        if os.getenv("SEED_DEMO_DATA", "true").strip().lower() in {"0", "false", "no", "off"}:
+            return
         with self.connect() as db:
             count = db.execute("SELECT COUNT(*) FROM projects").fetchone()[0]
         if count or not SEED_FILE.exists():

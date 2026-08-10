@@ -54,7 +54,11 @@ WorkingDirectory=$APP_DIR
 EnvironmentFile=$ENV_FILE
 ExecStart=/usr/bin/python3 $APP_DIR/server.py --host 0.0.0.0 --port $PORT
 Restart=always
-RestartSec=3
+RestartSec=1
+# 服务收到 SIGTERM 后会停止接受新连接，并留几秒让进行中的响应写完，
+# 这样重新部署时正在对话的人不会被砍断在半句话上。
+KillSignal=SIGTERM
+TimeoutStopSec=10
 StandardOutput=append:/var/log/practice-xiaoda.log
 StandardError=append:/var/log/practice-xiaoda.log
 

@@ -92,6 +92,47 @@ def validate_chat_request(payload: dict[str, Any]) -> tuple[list[dict[str, Any]]
     return normalized, stream, model
 
 
+def resolve_max_tokens(payload: dict[str, Any]) -> int | None:
+    """读取并校验 max_tokens。
+
+    OpenAI 允许省略或传 null。清小搭的连通性探测会发 `max_tokens: 1`——
+    此前这个参数被完全忽略，探测里我们照样返回几百 token 且 finish_reason 仍是
+    stop。虽然平台放行了，但这是实打实的协议偏差，客户端据此做预算会算错。
+    """
+    if "max_tokens" not in payload:
+        return None
+    value = payload["max_tokens"]
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ChatRequestError("max_tokens must be an integer", param="max_tokens")
+    if value < 1:
+        raise ChatRequestError("max_tokens must be at least 1", param="max_tokens")
+    return value
+
+
+def truncate_to_tokens(text: str, max_tokens: int | None) -> tuple[str, bool]:
+    """按 approximate_tokens 的口径把回复截到 max_tokens 以内。
+
+    返回 (文本, 是否被截断)。被截断时调用方应把 finish_reason 置为 "length"。
+    逐字累加而不是按比例估算，保证结果与 usage 里报的 completion_tokens 自洽。
+    """
+    if max_tokens is None or not text:
+        return text, False
+    if approximate_tokens(text) <= max_tokens:
+        return text, False
+    ascii_count = 0
+    non_ascii = 0
+    for index, char in enumerate(text):
+        if ord(char) < 128:
+            ascii_count += 1
+        else:
+            non_ascii += 1
+        if max(1, (ascii_count + 3) // 4 + non_ascii) > max_tokens:
+            return text[:index], True
+    return text, False
+
+
 def approximate_tokens(text: str) -> int:
     if not text:
         return 0
@@ -113,14 +154,26 @@ def model_list() -> dict[str, Any]:
     }
 
 
-def completion_payload(messages: list[dict[str, Any]], response: str, model: str, *, completion_id: str | None = None) -> dict[str, Any]:
+def completion_payload(
+    messages: list[dict[str, Any]],
+    response: str,
+    model: str,
+    *,
+    completion_id: str | None = None,
+    max_tokens: int | None = None,
+) -> dict[str, Any]:
     completion_id = completion_id or f"chatcmpl-pxd-{uuid.uuid4().hex[:20]}"
+    response, truncated = truncate_to_tokens(response, max_tokens)
     return {
         "id": completion_id,
         "object": "chat.completion",
         "created": int(time.time()),
         "model": model,
-        "choices": [{"index": 0, "message": {"role": "assistant", "content": response}, "finish_reason": "stop"}],
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": response},
+            "finish_reason": "length" if truncated else "stop",
+        }],
         "usage": usage_for(messages, response),
         "system_fingerprint": "practice-xiaoda-rules-v1",
     }
@@ -140,9 +193,16 @@ def _chunks(text: str, size: int = 36) -> Iterable[str]:
         position = boundary
 
 
-def stream_events(messages: list[dict[str, Any]], response: str, model: str) -> Iterable[str]:
+def stream_events(
+    messages: list[dict[str, Any]],
+    response: str,
+    model: str,
+    *,
+    max_tokens: int | None = None,
+) -> Iterable[str]:
     completion_id = f"chatcmpl-pxd-{uuid.uuid4().hex[:20]}"
     created = int(time.time())
+    response, truncated = truncate_to_tokens(response, max_tokens)
 
     def event(delta: dict[str, Any], finish_reason: str | None, usage: dict[str, int] | None = None) -> str:
         payload: dict[str, Any] = {
@@ -162,7 +222,7 @@ def stream_events(messages: list[dict[str, Any]], response: str, model: str) -> 
     yield event({"role": "assistant"}, None)
     for chunk in _chunks(response):
         yield event({"content": chunk}, None)
-    yield event({}, "stop", usage_for(messages, response))
+    yield event({}, "length" if truncated else "stop", usage_for(messages, response))
     yield "data: [DONE]\n\n"
 
 
@@ -536,10 +596,24 @@ class PracticeChatAdapter:
 
     def _list_projects(self) -> str:
         projects = [project for project in self.db.list_projects(include_expired=False) if project.get("status") == "published"]
+        if not projects:
+            # 全部项目都过了报名截止时会走到这里，换真实数据的过渡期也会。
+            # 原来会输出一个标题加一片空白，再跟一句无关的提示。
+            pending = [p for p in self.db.list_projects(include_expired=True) if p.get("status") == "needs_review"]
+            lines = ["当前没有仍在报名期内的已核验项目。"]
+            if pending:
+                lines.append(f"\n还有 {len(pending)} 个项目在人工复核队列里，核验通过后才会进入正式推荐。")
+            lines.append(
+                "\n如果你手上有招募通知，可以直接粘给我并说「导入这则通知」，"
+                "我会提取成带原文引用的项目卡。"
+            )
+            return "\n".join(lines)
         lines = ["当前可正式推荐的已核验项目："]
         for index, project in enumerate(projects[:8], 1):
             lines.append(f"{index}. **{project['title']}**｜截止 {project.get('signup_deadline') or '待确认'}｜{project.get('location', {}).get('detail') or '地点待确认'}")
-        lines.append("\n演示项目均有明确标识，不能作为真实报名依据。告诉我院系、年级、空闲时间、主题、地点和经费偏好，我可以继续筛选。")
+        if any(project.get("demo_data") for project in projects):
+            lines.append("\n带“演示”标识的项目不能作为真实报名依据。")
+        lines.append("告诉我院系、年级、空闲时间、主题、地点和经费偏好，我可以继续筛选。")
         return "\n".join(lines)
 
     def _welcome(self) -> str:
@@ -584,12 +658,18 @@ class PracticeChatAdapter:
                 lines.append(
                     f"- {project['title']}｜截止 {project.get('signup_deadline') or '待确认'}"
                 )
-        lines.extend([
-            "",
-            "**你可以直接说**",
-            "- 「我大三，八月有空，推荐乡村振兴方向的实践」——按你的条件筛，并说明推荐和排除的理由",
-            "- 直接说出上面任一个项目名——看它的时间、资格、报销和报名方式",
-            "- 「比较前两个推荐项目」——逐项对比",
-            "- 「帮我写第一个的报名理由」——生成报名材料填写建议，也可以换成外联话术、访谈提纲、报告框架",
-        ])
+        lines += ["", "**你可以直接说**",
+                  "- 「我大三，八月有空，推荐乡村振兴方向的实践」——按你的条件筛，并说明推荐和排除的理由"]
+        if openings:
+            # 没有在招项目时不能说"上面任一个项目名"，那会指向一片空白。
+            lines += [
+                "- 直接说出上面任一个项目名——看它的时间、资格、报销，以及每个字段的原文引用",
+                "- 「比较前两个推荐项目」——逐项对比",
+                "- 「帮我写第一个的报名理由」——也可以换成外联话术、访谈提纲、报告框架",
+            ]
+        else:
+            lines += [
+                "- 「还有哪些实践机会」——看项目库当前状态",
+                "- 粘贴一则招募通知并说「导入这则通知」——我会提取成带原文引用的项目卡",
+            ]
         return "\n".join(lines)

@@ -91,6 +91,50 @@ class ExtractionTests(unittest.TestCase):
         self.assertNotIn("practice_dates", project["uncertain_fields"])
 
 
+class NoticeLayoutTests(unittest.TestCase):
+    """真实公众号排版的抽取。两种版式此前会整片抽错。"""
+
+    def test_label_on_its_own_line_with_value_below(self):
+        # 最标准的通知写法：小标题一行，值在下一行。抽取器只在同一行找值，
+        # 结果截止日期抽不到，「二、实践地点」这行小标题反而成了地点。
+        notice = "\n".join([
+            "关于组建2026年赴福建龙岩红色文化调研支队的通知",
+            "",
+            "一、实践时间",
+            "2026年9月10日至9月18日",
+            "",
+            "二、实践地点",
+            "福建省龙岩市上杭县、长汀县",
+            "",
+            "五、报名截止",
+            "2026年9月1日18:00",
+        ])
+        project = extract_project(notice, {}, today=date(2026, 8, 1))
+        self.assertEqual(project["signup_deadline"], "2026-09-01")
+        self.assertIn("龙岩", project["location"]["detail"])
+        self.assertNotIn("实践地点", project["location"]["detail"])
+        self.assertEqual(project["practice_start"], "2026-09-10")
+        self.assertEqual(project["practice_end"], "2026-09-18")
+
+    def test_fields_packed_into_one_line_with_pipes(self):
+        # 微信里很常见：全部要素挤在一行、用 | 分隔。以前整行会被吞进地点，
+        # 实践时间还会出现结束早于开始。
+        notice = (
+            "【招募】清华大学乡村振兴工作站赴云南剑川实践支队 | 实践时间：2026.09.05-09.14 | "
+            "地点：云南省大理州剑川县 | 招募对象：全校本科生及研究生 | 报名截止：2026年8月30日"
+        )
+        project = extract_project(notice, {}, today=date(2026, 8, 1))
+        self.assertEqual(project["title"], "清华大学乡村振兴工作站赴云南剑川实践支队")
+        self.assertEqual(project["signup_deadline"], "2026-08-30")
+        self.assertEqual(project["location"]["detail"], "云南省大理州剑川县")
+        self.assertLessEqual(project["practice_start"], project["practice_end"])
+
+    def test_ordinal_prefix_does_not_eat_a_year(self):
+        # 序号前缀必须带分隔符才剥，否则「2026年…」的年份会被当成序号吃掉。
+        project = extract_project("某支队招募\n报名截止：2026年9月1日", {}, today=date(2026, 8, 1))
+        self.assertEqual(project["signup_deadline"], "2026-09-01")
+
+
 class RecommendationTests(unittest.TestCase):
     def setUp(self):
         self.project = extract_project(

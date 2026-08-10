@@ -93,9 +93,22 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertTrue(headers["Content-Type"].startswith("application/json"))
         parsed = json.loads(body)
         self.assertIsInstance(parsed["choices"][0]["message"]["content"], str)
-        self.assertEqual(parsed["choices"][0]["finish_reason"], "stop")
+        # 平台的连通性探测就是这个形状（max_tokens: 1）。以前我们完全忽略
+        # max_tokens、照样返回上百 token 且 finish_reason 是 stop；那不符合
+        # OpenAI 语义——被 max_tokens 截断时应当是 length。
+        self.assertEqual(parsed["choices"][0]["finish_reason"], "length")
+        self.assertEqual(parsed["usage"]["completion_tokens"], 1)
         self.assertEqual(set(parsed["usage"]), {"prompt_tokens", "completion_tokens", "total_tokens"})
         self.assertLess(elapsed, 5)
+
+    def test_minimal_probe_without_max_tokens_still_stops_normally(self):
+        # 不设上限时必须是 stop，别把 length 变成常态。
+        status, _, body, _ = self.call("/v1/chat/completions", method="POST", payload={
+            "messages": [{"role": "user", "content": "你好"}],
+        })
+        self.assertEqual(status, 200)
+        parsed = json.loads(body)
+        self.assertEqual(parsed["choices"][0]["finish_reason"], "stop")
 
     def test_invalid_stream_missing_messages_and_image_return_400(self):
         cases = [
@@ -129,7 +142,8 @@ class ServerProtocolTests(unittest.TestCase):
         stop_frames = [frame for frame in frames if frame["choices"][0]["finish_reason"] is not None]
         self.assertEqual(len(role_frames), 1)
         self.assertEqual(len(stop_frames), 1)
-        self.assertEqual(stop_frames[0]["choices"][0]["finish_reason"], "stop")
+        # 同上：这里带了 max_tokens: 1，所以收尾帧应当是 length 而不是 stop。
+        self.assertEqual(stop_frames[0]["choices"][0]["finish_reason"], "length")
         self.assertEqual(set(stop_frames[0]["usage"]), {"prompt_tokens", "completion_tokens", "total_tokens"})
 
     def test_production_requires_chat_key_and_admin_key(self):
