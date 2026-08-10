@@ -152,6 +152,38 @@ def stream(system_prompt: str, user_prompt: str, *, temperature: float = 0.7) ->
         raise LLMUnavailable("模型没有返回任何内容")
 
 
+INTENT_SYSTEM_PROMPT = (
+    "你是一个意图分类器，服务于一个「清华大学社会实践」信息助手。"
+    "只输出一个标签，不要解释，不要标点。可选标签：\n"
+    "recommend —— 想找/筛选实践项目，或描述了自己的时间、院系、年级、地点、主题偏好\n"
+    "list —— 想看有哪些项目、还剩什么、最近截止的\n"
+    "project —— 在问某个具体项目的情况\n"
+    "generate —— 想要报名理由、外联话术、访谈提纲、调研报告框架\n"
+    "post —— 想要公众号推送文案、宣传稿\n"
+    "compare —— 想比较两个项目\n"
+    "import —— 想把一段招募通知存进来\n"
+    "provenance —— 在质疑或询问数据从哪来、准不准、什么时候更新\n"
+    "about —— 在问社会实践本身的常识（学分、保研、流程、组队）\n"
+    "help —— 在问这个助手能做什么\n"
+    "other —— 与社会实践无关，或以上都不是\n"
+)
+
+
+def classify_intent(text: str) -> str:
+    """给规则匹配兜底：判断这句话到底想干什么。
+
+    只做分类，不产生任何事实——具体内容仍然由规则 + SQLite 出。
+    这样既接住了词表覆盖不到的长尾说法，又不会让模型有机会编造项目信息。
+    调用方必须自己处理 LLMUnavailable。
+    """
+    label = complete(INTENT_SYSTEM_PROMPT, text[:400], temperature=0).strip().lower()
+    for known in ("recommend", "list", "project", "generate", "post", "compare",
+                  "import", "provenance", "about", "help", "other"):
+        if known in label:
+            return known
+    return "other"
+
+
 def ping() -> tuple[bool, str]:
     """给运维和自检用：真的打一次最小请求，返回 (是否可用, 说明)。"""
     if not is_enabled():

@@ -304,6 +304,45 @@ RECOMMEND_WORDS = (
     # 「我八月有空，想去云南做实践」——意图很明确，以前却掉兜底。
     "想找", "想去", "想参加", "想报", "有空", "有时间", "空闲", "能参加",
 )
+# —— 以下几组是"先判断这句话到底想干什么"，排在具体意图之前 ——
+#
+# 关键词匹配最大的毛病不是接不住，而是接错：句子里出现"实践""想参加""帮我写"
+# 就往推荐或生成上撞。实测「帮我改改这段话：我很想参加这个实践」会返回一整页
+# 项目推荐，「帮我写一个乡村教育的调研提纲」会返回某个项目的报名表填写建议。
+# 自信地答错比老实说不会更伤——用户会觉得它听不懂人话，而且"准确性"是评分维度。
+
+# 问数据从哪来、准不准。这恰恰是本产品最该答好的问题：每个字段都留了原文引用。
+PROVENANCE_WORDS = (
+    "准吗", "准确吗", "靠谱吗", "可靠吗", "真的吗", "是真的",
+    "怎么知道", "哪来的", "哪里来的", "什么来源", "数据来源", "信息来源",
+    "什么时候更新", "多久更新", "更新频率", "最近更新",
+    "是不是漏", "有没有漏", "全不全", "全吗", "完整吗",
+    "会不会有错", "错了怎么办",
+)
+
+# 写作/润色类，但没有绑定到具体项目——不该当成"给某个项目生成材料"。
+WRITING_HELP_WORDS = (
+    "改改", "改一下", "润色", "修改一下", "通顺吗", "帮我看看这段",
+    "怎么写", "怎么下笔", "写作技巧", "提纲怎么", "框架怎么",
+    "调研提纲", "写提纲", "写框架", "写一份", "写一个",
+)
+
+# 关于社会实践本身的常识性提问，不是在找项目。
+ABOUT_PRACTICE_WORDS = (
+    "保研", "加分", "有什么用", "有用吗", "值得吗", "算学分", "综测",
+    "怎么组队", "怎么组建", "支队是什么", "什么是社会实践", "第一次参加",
+    "有什么建议", "注意什么", "需要准备什么",
+)
+
+# 让我帮着拿主意，而不是列清单。
+DECISION_WORDS = (
+    "参谋", "拿不定", "拿不准", "选哪个", "报哪个", "去哪个", "哪个好",
+    "更容易", "更稳", "怎么选", "帮我决定", "犹豫",
+)
+
+# 否定与纠正：多轮里非常常见，掉兜底会显得完全没在听。
+NEGATION_WORDS = ("不要", "不想", "别推荐", "除了", "换几个", "换一批", "重新推荐", "说错了", "搞错了", "不是这个")
+
 POST_WORDS = (
     "推送", "推文", "公众号文案", "宣传稿", "宣传文案", "招募文案",
     "招募推送", "朋友圈文案", "宣传推送",
@@ -380,6 +419,22 @@ class PracticeChatAdapter:
 
         if self._is_import(latest):
             return self._import_notice(latest)
+
+        # 这几组必须排在具体意图之前，否则会被"实践""帮我写"这类词抢走。
+        if any(word in latest for word in PROVENANCE_WORDS):
+            return ChatResult(self._provenance(), "provenance")
+        if any(word in latest for word in ABOUT_PRACTICE_WORDS):
+            return ChatResult(self._about_practice(latest), "about_practice")
+        # 注意这里要用"精确点名"而不是模糊匹配：说「帮我写一个乡村教育的调研提纲」时，
+        # 「乡村教育」会模糊命中「滇西乡村教育数字化调研」，于是被当成给那个项目写材料。
+        # 只有用户完整说出项目名或 ID，才认为这次写作请求是绑定到项目的。
+        if any(word in latest for word in WRITING_HELP_WORDS) and not self._mentions_project_exactly(latest):
+            return ChatResult(self._writing_help(latest), "writing_help")
+        if any(word in latest for word in NEGATION_WORDS):
+            return self._handle_correction(messages, all_user_text, latest)
+        if any(word in latest for word in DECISION_WORDS):
+            return self._help_decide(messages, all_user_text, latest)
+
         # 推送文案必须排在 GENERATE_WORDS 之前：「帮我写推送」里的"帮我写"
         # 也在生成材料的词表里，先匹配到就会去出报名表建议了。
         if any(word in latest for word in POST_WORDS):
@@ -408,7 +463,50 @@ class PracticeChatAdapter:
         candidates = self.match_projects(latest)
         if candidates:
             return ChatResult(self._pick_one_of(candidates, "看"), "project_candidates")
+
+        # 走到这里说明所有词表都没接住。关键词永远补不完——今天补了"参谋"，
+        # 明天用户说"拿不定主意"。所以在掉兜底之前，让模型判断一次意图，
+        # 再交回规则执行。模型只输出一个标签，不产生任何事实，
+        # "推荐结果和字段值全部来自规则 + SQLite" 这条底线不受影响。
+        # 常见问法上面就命中了，压根走不到这里，所以延迟和成本只发生在长尾上。
+        routed = self._route_by_model(messages, all_user_text, latest)
+        if routed is not None:
+            return routed
         return ChatResult(self._fallback(), "fallback")
+
+    def _route_by_model(
+        self, messages: list[dict[str, Any]], all_user_text: str, latest: str
+    ) -> ChatResult | None:
+        if not llm.is_enabled():
+            return None
+        try:
+            intent = llm.classify_intent(latest)
+        except llm.LLMUnavailable:
+            return None  # 模型不可用就照常掉兜底，不把外部故障变成用户可见的错误
+        if intent == "recommend":
+            return self._recommend(all_user_text)
+        if intent == "list":
+            return ChatResult(self._list_projects(), "list_projects")
+        if intent == "compare":
+            return self._compare(messages, all_user_text)
+        if intent == "generate":
+            return self._generate(messages, all_user_text, latest)
+        if intent == "post":
+            return self._draft_post(messages, all_user_text, latest)
+        if intent == "import":
+            return ChatResult(
+                "看起来你想把一则招募通知存进来。"
+                "把**完整正文**贴给我，开头写上「导入这则通知：」就行——"
+                "我会提取成带原文引用的项目卡，抽不准的字段会标成待确认，不替它编。",
+                "import_hint",
+            )
+        if intent == "provenance":
+            return ChatResult(self._provenance(), "provenance")
+        if intent == "about":
+            return ChatResult(self._about_practice(latest), "about_practice")
+        if intent in {"help", "project"}:
+            return ChatResult(self._welcome(), "help")
+        return None
 
     @staticmethod
     def _is_import(text: str) -> bool:
@@ -592,14 +690,38 @@ class PracticeChatAdapter:
     # 这种词在几十条通知里到处都是。
     _MATCH_MIN_RUN = 3
 
-    def match_projects(self, text: str, *, limit: int = 5) -> list[dict[str, Any]]:
-        """按标题与用户这句话的公共片段找候选项目，最相关的排前面。"""
-        text = (text or "")[:120]
-        if len(text) < self._MATCH_MIN_RUN:
+    # 说明这句话是在指代某个具体项目，而不是随口提到一个词。
+    _REFERENCE_HINTS = ("那个", "这个", "那条", "这条", "那支", "这支", "的项目",
+                        "详情", "介绍一下", "第一个", "第二个", "刚才", "上面")
+
+    def match_projects(self, text: str, *, limit: int = 5, loose: bool | None = None) -> list[dict[str, Any]]:
+        """按标题与用户这句话的公共片段找候选项目，最相关的排前面。
+
+        先要求三个汉字连着对上。找不到时可以退一步用两个字——「滇西」「湘西」
+        「龙岩」「延安」这类地名就是两个字，真实数据里很常见。
+
+        但两个字太危险：「实践」「教育」「调研」几乎每条标题里都有，放开之后
+        「社会实践是个好东西」会被当成在问某个项目。所以放宽有前提——要么这句话
+        本身带指代（「滇西**那个**」），要么调用方已经确定用户是要对某个项目
+        做事（生成材料、写推送），此时上下文足够明确。
+        """
+        hits = self._match_with_min_run(text, self._MATCH_MIN_RUN, limit)
+        if hits:
+            return hits
+        if loose is None:
+            loose = any(hint in text for hint in self._REFERENCE_HINTS)
+        if not loose:
             return []
-        # 先用 3-gram 交集粗筛，再对少数幸存者做最长公共子串。
+        two_char = self._match_with_min_run(text, 2, limit + 1)
+        return two_char if 0 < len(two_char) <= 2 else []
+
+    def _match_with_min_run(self, text: str, min_run: int, limit: int) -> list[dict[str, Any]]:
+        text = (text or "")[:120]
+        if len(text) < min_run:
+            return []
+        # 先用 n-gram 交集粗筛，再对少数幸存者做最长公共子串。
         # 逐条跑 LCS 在几十条项目时无所谓，但库涨到几百条会明显拖慢每一次对话。
-        n = self._MATCH_MIN_RUN
+        n = min_run
         grams = {text[i:i + n] for i in range(len(text) - n + 1)}
         scored: list[tuple[int, int, dict[str, Any]]] = []
         for index, project in enumerate(self._projects(include_expired=True)):
@@ -613,7 +735,8 @@ class PracticeChatAdapter:
         return [project for _run, _idx, project in scored[:limit]]
 
     def _resolve_project(
-        self, messages: list[dict[str, Any]], latest: str, *, latest_only: bool = False
+        self, messages: list[dict[str, Any]], latest: str, *,
+        latest_only: bool = False, loose: bool | None = None,
     ) -> dict[str, Any] | None:
         projects = self._projects(include_expired=True)
         direct = [project for project in projects if project["title"] in latest or project["id"] in latest]
@@ -622,7 +745,7 @@ class PracticeChatAdapter:
 
         # 模糊匹配：只有当最相关的那个明显强于第二名时才认定，
         # 否则宁可让调用方列出候选让用户挑，也不猜错项目。
-        candidates = self.match_projects(latest)
+        candidates = self.match_projects(latest, loose=loose)
         if candidates:
             if len(candidates) == 1:
                 return candidates[0]
@@ -660,9 +783,9 @@ class PracticeChatAdapter:
             kind = "itinerary"
         elif any(word in latest for word in ["报告框架", "报告大纲"]):
             kind = "report"
-        project = self._resolve_project(messages, latest)
+        project = self._resolve_project(messages, latest, loose=True)
         if not project:
-            candidates = self.match_projects(latest)
+            candidates = self.match_projects(latest, loose=True)
             if len(candidates) > 1:
                 return ChatResult(self._pick_one_of(candidates, "生成材料给"), "generate_needs_project")
             return ChatResult(
@@ -718,9 +841,9 @@ class PracticeChatAdapter:
         模型只负责把这些事实组织成通顺的文字。模型不可用时回落到要点清单，
         用户仍然拿得到能用的东西，而不是一个报错。
         """
-        project = self._resolve_project(messages, latest)
+        project = self._resolve_project(messages, latest, loose=True)
         if not project:
-            candidates = self.match_projects(latest)
+            candidates = self.match_projects(latest, loose=True)
             if len(candidates) > 1:
                 return ChatResult(self._pick_one_of(candidates, "写推送给"), "draft_post_needs_project")
             return ChatResult(
@@ -801,6 +924,157 @@ class PracticeChatAdapter:
             f"{facts}\n\n"
             "> 以上字段来自项目卡；标着「待确认」的请先核对原文通知再写进文案。"
         )
+
+    def _mentions_project_exactly(self, text: str) -> bool:
+        """用户是否完整点名了某个项目（标题或 ID），不做模糊。"""
+        return any(
+            project["title"] in text or project["id"] in text
+            for project in self._projects(include_expired=True)
+        )
+
+    def _provenance(self) -> str:
+        """回答"这些信息准吗 / 你怎么知道的 / 数据什么时候更新的"。
+
+        这是本产品最该答好的一类问题——它和"让大模型直接读通知"的区别就在这里。
+        所以不能空谈可靠，要把实际数字摆出来：库里多少条、多少条核验过、
+        多少条还没核验、来源有几个、最近一次导入是什么时候。
+        """
+        projects = self._projects(include_expired=True)
+        published = [p for p in projects if p.get("status") == "published"]
+        pending = [p for p in projects if p.get("status") == "needs_review"]
+        expired = [p for p in projects if p.get("status") == "expired"]
+        sources = sorted({p.get("source_account", "") for p in projects if p.get("source_account")})
+        with_evidence = [p for p in projects if (p.get("field_evidence") or {})]
+        with_link = [p for p in projects if p.get("source_url")]
+        demo = [p for p in projects if p.get("demo_data")]
+
+        latest_import = ""
+        for item in self.db.recent_activity(limit=20):
+            if item.get("event_type") in {"ingest", "seed", "collector"}:
+                latest_import = item.get("created_at", "")[:16].replace("T", " ")
+                break
+
+        lines = [
+            "我不猜，只转述已经存进项目库的内容，每个关键字段都留了原文引用。",
+            "",
+            "**数据是怎么来的**",
+            "- 来自公众号招募通知：可以是采集到的、你粘贴的正文，或截图 OCR 出来的文本",
+            "- 抽取出报名截止、实践时间、地点、参与资格、经费等字段，"
+            "同时把对应的**原文原句**一并存下来——你可以直接说出项目名，看每个字段是从哪句话来的",
+            "- 抽不准或原文没写的，标成「待确认」，不会替它编一个值",
+            "",
+            "**现在库里的实际情况**",
+            f"- 共 {len(projects)} 条：已核验 {len(published)} 条、待人工核验 {len(pending)} 条、已过截止 {len(expired)} 条",
+            f"- 带原文引用的 {len(with_evidence)} 条，带原文链接的 {len(with_link)} 条",
+            f"- 来源账号 {len(sources)} 个" + ("：" + "、".join(sources[:5]) if sources else ""),
+        ]
+        if latest_import:
+            lines.append(f"- 最近一次入库：{latest_import}")
+        if demo:
+            lines.append(f"- 其中 {len(demo)} 条是演示数据，会明确标注，不能作为真实报名依据")
+
+        lines += [
+            "",
+            "**哪些地方仍然可能出错**",
+            "- 只有人工核验过的项目才会进正式推荐；待核验的单独列出，不作数",
+            "- 通知发出后主办方可能改时间或延长报名，库里不一定跟得上",
+            "- 所以：**报名前请点开原文链接再核对一次**，尤其是截止时间和资格要求",
+        ]
+        return "\n".join(lines)
+
+    def _about_practice(self, latest: str) -> str:
+        """关于社会实践本身的常识提问——不是在找项目，别丢一页推荐给人家。"""
+        base = (
+            "这个问题超出我能负责的范围了——我只对项目库里那些**有原文出处**的信息负责，"
+            "不想拿没有依据的说法糊弄你。\n\n"
+        )
+        if any(word in latest for word in ("保研", "加分", "综测", "学分")):
+            return base + (
+                "社会实践和保研、综测的换算规则各院系不一样，而且逐年调整，"
+                "以你所在院系当年的文件和辅导员口径为准，别信二手转述。\n\n"
+                "我能帮的是：按你的时间、地点、主题筛出还能报名的项目，"
+                "并给出每个字段的原文出处。要试试吗？"
+            )
+        if any(word in latest for word in ("组队", "组建", "支队是什么")):
+            return base + (
+                "组队和立项流程由校团委和各院系发布，每年细节有变化，建议直接查最新通知。\n\n"
+                "我这边可以做的是：帮你找已经在招募的支队（很多支队本来就缺人），"
+                "或者你已经有了项目，我可以帮你写报名理由、外联话术、访谈提纲和推送文案。"
+            )
+        if any(word in latest for word in ("第一次参加", "有什么建议", "注意什么", "需要准备什么")):
+            # 第一次参加的人是最该好好接住的——上来就说"超出范围"太冷了。
+            return (
+                "第一次参加的话，挑项目时我建议按这个顺序看：\n\n"
+                "1. **报名截止来不来得及**——很多人是看到通知时已经过了\n"
+                "2. **时间冲不冲突**——实践期常和小学期、暑培撞车，先把日历对一遍\n"
+                "3. **资格限不限院系年级**——写明限定的就是硬门槛，别抱侥幸\n"
+                "4. **经费怎么算**——交通住宿自理还是报销，差别很大\n"
+                "5. **最后才是主题**——能不能真正参与进去，比题目大不大重要\n\n"
+                "前四条我可以直接帮你筛掉不符合的，并说明每条为什么被排除。"
+                "告诉我你的院系、年级、大概什么时候有空、想去哪类地方？\n\n"
+                "> 至于流程、学分、材料这些规定，各院系每年都在变，以你院系的最新通知为准——"
+                "这部分我没有可回查的依据，不替你猜。"
+            )
+        return base + (
+            "我能帮的是这几件事：按条件筛项目并解释推荐理由、给出每个字段的原文引用、"
+            "比较两个项目、为指定项目生成报名理由和外联访谈材料、把招募通知转成项目卡。\n\n"
+            "先说说你的院系、年级和大概什么时候有空？"
+        )
+
+    def _writing_help(self, latest: str) -> str:
+        """写作/润色请求，但没绑定到具体项目。
+
+        以前这类会被"实践""帮我写"带偏，返回一页项目推荐或某个项目的报名表建议。
+        """
+        return (
+            "你是想让我帮着写点东西——但我得先知道是给**哪个项目**写，"
+            "因为材料里的时间、地点、资格、报名方式都要跟已核验的项目卡对上，我不能凭空编。\n\n"
+            "**说出项目名**（标题里能区分的几个字就行），然后告诉我要哪一种：\n"
+            "- 报名理由：按报名表栏目给出逐项填写建议\n"
+            "- 当地外联话术：联系当地机构时怎么开口\n"
+            "- 访谈提纲：围绕已选点位的问题清单\n"
+            "- 调研报告框架：章节结构与要点\n"
+            "- 公众号推送文案：可直接改的成稿\n\n"
+            "如果你还没定项目，先说「推荐」加上你的时间和方向，我先帮你筛。"
+        )
+
+    def _help_decide(self, messages: list[dict[str, Any]], all_user_text: str, latest: str) -> ChatResult:
+        """「帮我参谋一下」「哪个更容易被选上」——用户要的是判断依据，不是清单。"""
+        result = self._recommend(all_user_text)
+        addition = (
+            "\n\n---\n\n**怎么挑，我的建议**\n"
+            "- **先看硬条件**：报名截止是否来得及、时间和你的安排冲不冲、资格限制符不符——这几条不满足，再喜欢也没用\n"
+            "- **再看信息完整度**：待确认字段越少，说明通知写得越清楚，主办方通常也更靠谱\n"
+            "- **最后才看主题偏好**：真正影响你收获的是能不能深入参与，而不是题目听起来大不大\n\n"
+            "「哪个更容易被选上」我答不了——各支队的选人标准不公开，我手里也没有往年录取数据，"
+            "编一个说法出来对你没好处。但报名材料写得具体、和项目主题对得上，通常比写得漂亮更有用。\n\n"
+            "想让我帮你逐项对比其中两个，说「比较前两个推荐项目」。"
+        )
+        return ChatResult(result.content + addition, "help_decide", result.project_id)
+
+    def _handle_correction(self, messages: list[dict[str, Any]], all_user_text: str, latest: str) -> ChatResult:
+        """处理「不要北京的，换几个」「说错了，我大四」这类否定与纠正。
+
+        以前整句掉兜底，用户会觉得完全没在听。这里的做法很朴素：把这一句连同
+        历史一起重新抽取偏好、重新推荐，并明确说出我理解到的排除项——
+        理解错了用户能马上纠正，比默默猜一个结果强。
+        """
+        excluded_terms = []
+        for term in KNOWN_LOCATIONS + list(THEME_KEYWORDS.keys()):
+            for marker in ("不要", "不想", "别推荐", "除了"):
+                if f"{marker}{term}" in latest:
+                    excluded_terms.append(term)
+                    break
+
+        result = self._recommend(all_user_text)
+        notes = ["已按你最新的说法重新筛了一遍。"]
+        if excluded_terms:
+            notes.append(f"我理解你想避开：{'、'.join(dict.fromkeys(excluded_terms))}。")
+        notes.append(
+            "如果我理解偏了，直接把完整条件再说一遍就行——比如"
+            "「我大四，九月有空，想去西部，要有报销」。"
+        )
+        return ChatResult("\n".join(notes) + "\n\n" + result.content, "recommend_corrected", result.project_id)
 
     def _compare(self, messages: list[dict[str, Any]], text: str) -> ChatResult:
         projects = self._projects(include_expired=True)

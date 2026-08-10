@@ -271,6 +271,82 @@ class DraftPostTests(unittest.TestCase):
         self.assertEqual(self.reply("帮我写个推送文案").intent, "draft_post_needs_project")
 
 
+class IntentSafetyTests(unittest.TestCase):
+    """关键词匹配最大的毛病不是接不住，而是接错。
+
+    这些用例全部来自实测：句子里出现「实践」「想参加」「帮我写」就被抢去
+    走推荐或生成，返回一整页牛头不对马嘴的内容。自信地答错比老实说不会更伤。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.adapter = PracticeChatAdapter(Database(Path(self.tmp.name) / "intent.db"))
+        self._enabled = chat_adapter.llm.is_enabled
+        chat_adapter.llm.is_enabled = lambda: False  # 先只验规则，不让模型参与
+
+    def tearDown(self):
+        chat_adapter.llm.is_enabled = self._enabled
+        self.tmp.cleanup()
+
+    def reply(self, text):
+        return self.adapter.reply([{"role": "user", "content": text}])
+
+    def test_writing_request_without_a_project_is_not_treated_as_search(self):
+        for phrase in ("帮我改改这段话：我很想参加这个实践", "帮我写一个乡村教育的调研提纲"):
+            with self.subTest(phrase=phrase):
+                self.assertEqual(self.reply(phrase).intent, "writing_help")
+
+    def test_questions_about_practice_itself_are_not_answered_with_projects(self):
+        for phrase in ("参加社会实践对保研有帮助吗", "怎么组建一个支队"):
+            with self.subTest(phrase=phrase):
+                self.assertEqual(self.reply(phrase).intent, "about_practice")
+
+    def test_provenance_questions_are_answered_with_real_numbers(self):
+        # 这是本产品最该答好的一类问题，以前全部掉兜底。
+        for phrase in ("这些信息准吗", "你怎么知道这个截止日期的", "你的数据什么时候更新的"):
+            with self.subTest(phrase=phrase):
+                result = self.reply(phrase)
+                self.assertEqual(result.intent, "provenance")
+                self.assertIn("原文", result.content)
+
+    def test_a_passing_mention_of_a_theme_word_is_not_a_project_lookup(self):
+        # 「实践」「教育」几乎每条标题里都有，不能因为提到就返回项目卡。
+        for phrase in ("社会实践是个好东西", "我对教育很感兴趣"):
+            with self.subTest(phrase=phrase):
+                self.assertEqual(self.reply(phrase).intent, "fallback")
+
+    def test_two_char_place_name_works_when_the_sentence_points_at_a_project(self):
+        # 「滇西」「湘西」「龙岩」这类地名只有两个字，但带了指代就该认。
+        self.assertNotEqual(self.reply("滇西那个项目").intent, "fallback")
+
+    def test_model_fallback_is_optional_and_never_leaks_errors(self):
+        chat_adapter.llm.is_enabled = lambda: True
+
+        def boom(_text):
+            raise chat_adapter.llm.LLMUnavailable("模型挂了")
+
+        original = chat_adapter.llm.classify_intent
+        chat_adapter.llm.classify_intent = boom
+        try:
+            # 模型不可用时照常掉兜底，不能把外部故障变成用户看到的报错
+            self.assertEqual(self.reply("今天天气怎么样").intent, "fallback")
+        finally:
+            chat_adapter.llm.classify_intent = original
+
+    def test_model_fallback_routes_long_tail_wording(self):
+        # 词表接不住的说法：不含推荐/找项目/有空等任何关键词。
+        phrase = "有没有那种能去山里待一阵子的机会"
+        self.assertEqual(self.reply(phrase).intent, "fallback")  # 关掉模型时确实掉兜底
+
+        chat_adapter.llm.is_enabled = lambda: True
+        original = chat_adapter.llm.classify_intent
+        chat_adapter.llm.classify_intent = lambda _text: "recommend"
+        try:
+            self.assertEqual(self.reply(phrase).intent, "recommend")
+        finally:
+            chat_adapter.llm.classify_intent = original
+
+
 class MonthSpanTests(unittest.TestCase):
     """月份要跟着当前年份走。项目里已经因为写死日期栽过两次。"""
 
