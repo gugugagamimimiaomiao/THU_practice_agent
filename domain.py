@@ -36,6 +36,22 @@ KNOWN_DEPARTMENTS = [
     "美术学院", "新雅书院", "致理书院", "日新书院", "未央书院", "探微书院", "行健书院",
 ]
 
+# 抽取器内部用英文字段名，但「待确认字段」是要直接给学生看的——
+# 甩一串 eligibility、reimbursement 没人看得懂。
+FIELD_LABELS = {
+    "signup_deadline": "报名截止",
+    "eligibility": "参与资格",
+    "reimbursement": "经费与报销",
+    "practice_dates": "实践时间",
+    "location": "地点",
+    "signup_method": "报名方式",
+    "contact": "联系方式",
+    "organizer": "主办方",
+    "quota": "招募人数",
+    "source_url": "原文链接",
+    "required_materials": "报名材料",
+}
+
 GRADE_TERMS = ["本科生", "研究生", "硕士生", "博士生", "大一", "大二", "大三", "大四"]
 IDENTITY_TERMS = ["清华学生", "清华师生", "学生党员", "共青团员", "志愿者", "留学生"]
 
@@ -564,7 +580,7 @@ def score_project(project: dict[str, Any], profile: dict[str, Any], *, today: da
     uncertain = project.get("uncertain_fields", [])
     score -= min(15, len(uncertain) * 3)
     if uncertain:
-        warnings.append(f"待确认字段：{'、'.join(uncertain)}")
+        warnings.append(f"待确认字段：{'、'.join(FIELD_LABELS.get(name, name) for name in uncertain)}")
     if project.get("demo_data") and not any("演示数据" in warning for warning in warnings):
         warnings.append("这是演示数据，不可作为真实报名依据")
 

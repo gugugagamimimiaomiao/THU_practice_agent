@@ -11,6 +11,7 @@ import calendar
 import json
 import os
 import re
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -350,8 +351,28 @@ def _month_span(text: str) -> tuple[str, str] | None:
 class PracticeChatAdapter:
     def __init__(self, database: Database) -> None:
         self.db = database
+        # 单次请求内的项目列表缓存。一次对话里 list_projects 会被调五六次
+        # （匹配、推荐、列表、兜底各要一次），每次都是全表读 + 逐条 JSON 解析：
+        # 500 条项目时兜底回复要 237ms，其中大半耗在重复解析上。
+        # 用 threading.local 而不是实例属性——服务是多线程的，各请求不能互相串。
+        self._local = threading.local()
+
+    def _projects(self, *, include_expired: bool = True) -> list[dict[str, Any]]:
+        cache = getattr(self._local, "projects", None)
+        if cache is None:
+            cache = {}
+            self._local.projects = cache
+        if include_expired not in cache:
+            cache[include_expired] = self.db.list_projects(include_expired=include_expired)
+        return cache[include_expired]
+
+    def _reset_project_cache(self) -> None:
+        self._local.projects = {}
 
     def reply(self, messages: list[dict[str, Any]]) -> ChatResult:
+        # 每次对话开始时清空缓存：同一次请求内复用，跨请求不复用，
+        # 这样刚导入的项目下一句就能查到，不会读到过期快照。
+        self._reset_project_cache()
         user_messages = [item["content"].strip() for item in messages if item["role"] == "user" and item["content"].strip()]
         latest = user_messages[-1]
         all_user_text = "\n".join(user_messages)
@@ -382,6 +403,11 @@ class PracticeChatAdapter:
         named = self._resolve_project(messages, latest, latest_only=True)
         if named:
             return ChatResult(self._project_detail(named), "project_detail", named["id"])
+        # 说了个地名或主题、但有好几个项目都对得上时，把候选摆出来让用户挑，
+        # 这比直接掉兜底菜单有用得多——真实数据里同一个县往往有多支支队。
+        candidates = self.match_projects(latest)
+        if candidates:
+            return ChatResult(self._pick_one_of(candidates, "看"), "project_candidates")
         return ChatResult(self._fallback(), "fallback")
 
     @staticmethod
@@ -432,7 +458,9 @@ class PracticeChatAdapter:
             project["id"] = duplicate["id"]
             project["created_at"] = duplicate.get("created_at", project["created_at"])
         project = self.db.upsert_project(project, note="通过清小搭对话导入")
-        missing = "、".join(project.get("uncertain_fields", [])) or "无"
+        # 刚写进库，缓存里的快照已经过期，同一次回复里后面还会用到。
+        self._reset_project_cache()
+        missing = self._field_labels(project.get("uncertain_fields", [])) or "无"
         content = (
             f"已生成项目卡：**{project['title']}**\n\n"
             f"- 状态：{project['status']}\n"
@@ -474,7 +502,7 @@ class PracticeChatAdapter:
 
     def _recommend(self, text: str) -> ChatResult:
         profile = self._extract_profile(text)
-        result = recommend_projects(self.db.list_projects(include_expired=True), profile)
+        result = recommend_projects(self._projects(include_expired=True), profile)
         lines = ["## 正式推荐"]
         if not result["eligible"]:
             # 空结果最容易发生在换了真实数据、或全部项目都过了截止的时候。
@@ -507,23 +535,102 @@ class PracticeChatAdapter:
                 lines.append(f"- **{project['title']}**：{warnings}")
         if result["excluded"]:
             lines.append(f"\n另有 {len(result['excluded'])} 个项目因截止、时间、资格或经费硬条件被排除。")
+
+        # 采集进来的项目默认是 needs_review，只有人工核验过才进正式推荐。
+        # 真实数据下这一批往往比正式推荐多得多，不说明的话用户会以为"就这么点项目"。
+        pending = [
+            project for project in self._projects(include_expired=False)
+            if project.get("status") == "needs_review"
+        ]
+        shown = {item["project"]["id"] for item in result["potential"]}
+        unshown = [project for project in pending if project["id"] not in shown]
+        if unshown:
+            lines.append(
+                f"\n还有 {len(unshown)} 条已采集但尚未人工核验的项目没有进入上面的推荐——"
+                "关键字段还没核对完，先不作数。想看的话说「还有哪些实践机会」。"
+            )
         # 这句提示原本写死了演示项目的名字。换成真实数据后它会指向一个不存在的
         # 项目，用户照着说必然失败——所以改成引用本次结果里的头名。
         if result["eligible"]:
-            top_title = result["eligible"][0]["project"]["title"]
-            hint = f"「帮我写{top_title}的报名理由」"
+            # 别把完整标题塞进引导语——真实通知的标题有三四十字
+            # （「关于组建2026年赴湖南省湘西州花垣县开展……支队的通知」），
+            # 照着这句说没人打得出来。用序号指代，再告诉用户可以只说关键几个字。
+            hint = "「帮我写第一个的报名理由」"
             if len(result["eligible"]) >= 2:
                 hint = f"「比较前两个推荐项目」，或者{hint}"
-            lines.append(f"\n接下来可以说：{hint}。也可以直接说出项目名，看它的原文依据。")
+            lines.append(
+                f"\n接下来可以说：{hint}。"
+                "想看某一个的详情和原文引用，说出标题里能区分的那几个字就行——地名或主题都可以。"
+            )
         return ChatResult("\n".join(lines), "recommend")
+
+    @staticmethod
+    def _longest_common_run(a: str, b: str) -> int:
+        """两个字符串最长连续公共片段的长度。
+
+        真实通知的标题是「关于组建2026年赴湖南省湘西州花垣县开展智慧农业技术
+        应用调研支队的通知」这种三四十字的长句，而学生只会说「花垣县那个」或
+        「智慧农业那个」。原来要求整个标题是用户输入的子串，在真实数据下等于
+        这条路走不通，所以改成看双方最长的公共片段有多长。
+        """
+        if not a or not b:
+            return 0
+        previous = [0] * (len(b) + 1)
+        best = 0
+        for i in range(1, len(a) + 1):
+            current = [0] * (len(b) + 1)
+            ai = a[i - 1]
+            for j in range(1, len(b) + 1):
+                if ai == b[j - 1]:
+                    current[j] = previous[j - 1] + 1
+                    if current[j] > best:
+                        best = current[j]
+            previous = current
+        return best
+
+    # 三个汉字连着对上才算有信息量。两个字太容易误命中——「北京」「教育」
+    # 这种词在几十条通知里到处都是。
+    _MATCH_MIN_RUN = 3
+
+    def match_projects(self, text: str, *, limit: int = 5) -> list[dict[str, Any]]:
+        """按标题与用户这句话的公共片段找候选项目，最相关的排前面。"""
+        text = (text or "")[:120]
+        if len(text) < self._MATCH_MIN_RUN:
+            return []
+        # 先用 3-gram 交集粗筛，再对少数幸存者做最长公共子串。
+        # 逐条跑 LCS 在几十条项目时无所谓，但库涨到几百条会明显拖慢每一次对话。
+        n = self._MATCH_MIN_RUN
+        grams = {text[i:i + n] for i in range(len(text) - n + 1)}
+        scored: list[tuple[int, int, dict[str, Any]]] = []
+        for index, project in enumerate(self._projects(include_expired=True)):
+            title = project["title"]
+            if not any(gram in title for gram in grams):
+                continue
+            run = self._longest_common_run(title, text)
+            if run >= n:
+                scored.append((run, -index, project))
+        scored.sort(key=lambda item: (-item[0], -item[1]))
+        return [project for _run, _idx, project in scored[:limit]]
 
     def _resolve_project(
         self, messages: list[dict[str, Any]], latest: str, *, latest_only: bool = False
     ) -> dict[str, Any] | None:
-        projects = self.db.list_projects(include_expired=True)
+        projects = self._projects(include_expired=True)
         direct = [project for project in projects if project["title"] in latest or project["id"] in latest]
         if direct:
             return direct[0]
+
+        # 模糊匹配：只有当最相关的那个明显强于第二名时才认定，
+        # 否则宁可让调用方列出候选让用户挑，也不猜错项目。
+        candidates = self.match_projects(latest)
+        if candidates:
+            if len(candidates) == 1:
+                return candidates[0]
+            top = self._longest_common_run(candidates[0]["title"], latest)
+            second = self._longest_common_run(candidates[1]["title"], latest)
+            if top > second:
+                return candidates[0]
+
         if latest_only:
             return None
         conversation = "\n".join(item["content"] for item in messages)
@@ -533,6 +640,15 @@ class PracticeChatAdapter:
                 return mentioned[1]
             return mentioned[0]
         return None
+
+    def _pick_one_of(self, candidates: list[dict[str, Any]], purpose: str) -> str:
+        """有多个同样像的项目时，把候选摆出来让用户挑，而不是替他猜一个。"""
+        lines = [f"有 {len(candidates)} 个项目都对得上，你要{purpose}哪一个？", ""]
+        for project in candidates:
+            deadline = project.get("signup_deadline") or "截止待确认"
+            lines.append(f"- **{project['title']}**（{deadline}）")
+        lines.append("\n把标题里能区分的那几个字告诉我就行，比如地名或主题。")
+        return "\n".join(lines)
 
     def _generate(self, messages: list[dict[str, Any]], all_user_text: str, latest: str) -> ChatResult:
         kind = "application"
@@ -546,6 +662,9 @@ class PracticeChatAdapter:
             kind = "report"
         project = self._resolve_project(messages, latest)
         if not project:
+            candidates = self.match_projects(latest)
+            if len(candidates) > 1:
+                return ChatResult(self._pick_one_of(candidates, "生成材料给"), "generate_needs_project")
             return ChatResult(
                 "请先告诉我具体项目名称或项目 ID。我需要把材料绑定到已核验的项目时间、地点、资格和报名要求，不能凭空生成。",
                 "generate_needs_project",
@@ -601,8 +720,11 @@ class PracticeChatAdapter:
         """
         project = self._resolve_project(messages, latest)
         if not project:
+            candidates = self.match_projects(latest)
+            if len(candidates) > 1:
+                return ChatResult(self._pick_one_of(candidates, "写推送给"), "draft_post_needs_project")
             return ChatResult(
-                "先告诉我给哪个项目写推送——说出项目名就行。"
+                "先告诉我给哪个项目写推送——说出项目名，或者标题里能区分的那几个字就行。"
                 "我需要把文案绑定到已核验的时间、地点、资格和报名要求上，不能凭空写。",
                 "draft_post_needs_project",
             )
@@ -660,7 +782,7 @@ class PracticeChatAdapter:
             f"报名方式：{project.get('signup_method') or '待确认'}",
             f"经费与报销：{reimbursement}",
             f"主题标签：{'、'.join(project.get('theme_tags') or []) or '待确认'}",
-            f"待确认字段：{'、'.join(project.get('uncertain_fields') or []) or '无'}",
+            f"待确认字段：{PracticeChatAdapter._field_labels(project.get('uncertain_fields') or []) or '无'}",
         ])
 
     @staticmethod
@@ -681,7 +803,7 @@ class PracticeChatAdapter:
         )
 
     def _compare(self, messages: list[dict[str, Any]], text: str) -> ChatResult:
-        projects = self.db.list_projects(include_expired=True)
+        projects = self._projects(include_expired=True)
         mentioned = [project for project in projects if project["title"] in text or project["id"] in text]
         if len(mentioned) < 2:
             profile = self._extract_profile(text)
@@ -704,7 +826,8 @@ class PracticeChatAdapter:
         table.append(f"\n接下来可以说：「帮我写{a['title']}的报名理由」，或者直接说出其中一个项目名看它的原文依据。")
         return ChatResult("\n".join(table), "compare")
 
-    # 字段名到中文标签，用于展示原文依据。
+    # 字段名到中文标签。抽取器内部用英文字段名，但这些名字会一路出现在
+    # 「待确认字段」里给学生看——直接甩 eligibility、reimbursement 没人看得懂。
     _EVIDENCE_LABELS = {
         "signup_deadline": "报名截止",
         "eligibility": "参与资格",
@@ -713,7 +836,19 @@ class PracticeChatAdapter:
         "location": "地点",
         "signup_method": "报名方式",
         "contact": "联系方式",
+        "organizer": "主办方",
+        "quota": "招募人数",
+        "source_url": "原文链接",
+        "required_materials": "报名材料",
     }
+
+    @classmethod
+    def _field_label(cls, field: str) -> str:
+        return cls._EVIDENCE_LABELS.get(field, field)
+
+    @classmethod
+    def _field_labels(cls, fields: Iterable[str]) -> str:
+        return "、".join(cls._field_label(field) for field in fields)
 
     @classmethod
     def _project_detail(cls, project: dict[str, Any]) -> str:
@@ -730,7 +865,7 @@ class PracticeChatAdapter:
             f"- 资格：{project.get('eligibility', {}).get('restriction_text') or '待确认'}",
             f"- 经费：{project.get('reimbursement', {}).get('text') or '待确认'}",
             f"- 报名方式：{project.get('signup_method') or '待确认'}",
-            f"- 待确认字段：{'、'.join(project.get('uncertain_fields', [])) or '无'}",
+            f"- 待确认字段：{cls._field_labels(project.get('uncertain_fields', [])) or '无'}",
         ]
 
         # 把原文引用摆到对话里。"关键字段可回查原文"是这个产品区别于
@@ -760,11 +895,11 @@ class PracticeChatAdapter:
         return "\n".join(lines)
 
     def _list_projects(self) -> str:
-        projects = [project for project in self.db.list_projects(include_expired=False) if project.get("status") == "published"]
+        projects = [project for project in self._projects(include_expired=False) if project.get("status") == "published"]
         if not projects:
             # 全部项目都过了报名截止时会走到这里，换真实数据的过渡期也会。
             # 原来会输出一个标题加一片空白，再跟一句无关的提示。
-            pending = [p for p in self.db.list_projects(include_expired=True) if p.get("status") == "needs_review"]
+            pending = [p for p in self._projects(include_expired=True) if p.get("status") == "needs_review"]
             lines = ["当前没有仍在报名期内的已核验项目。"]
             if pending:
                 lines.append(f"\n还有 {len(pending)} 个项目在人工复核队列里，核验通过后才会进入正式推荐。")
@@ -776,9 +911,25 @@ class PracticeChatAdapter:
         lines = ["当前可正式推荐的已核验项目："]
         for index, project in enumerate(projects[:8], 1):
             lines.append(f"{index}. **{project['title']}**｜截止 {project.get('signup_deadline') or '待确认'}｜{project.get('location', {}).get('detail') or '地点待确认'}")
+        if len(projects) > 8:
+            lines.append(f"（共 {len(projects)} 条，只列出前 8 条）")
+
+        pending = [
+            project for project in self._projects(include_expired=False)
+            if project.get("status") == "needs_review"
+        ]
+        if pending:
+            lines.append(f"\n**尚未人工核验的（{len(pending)} 条）**")
+            for project in pending[:5]:
+                missing = self._field_labels(project.get("uncertain_fields", [])[:3]) or "关键字段待核对"
+                lines.append(f"- {project['title']}｜待确认：{missing}")
+            if len(pending) > 5:
+                lines.append(f"（还有 {len(pending) - 5} 条）")
+            lines.append("这些是已采集但还没核对完的线索，不进正式推荐，报名前务必自行核对原文。")
+
         if any(project.get("demo_data") for project in projects):
             lines.append("\n带“演示”标识的项目不能作为真实报名依据。")
-        lines.append("告诉我院系、年级、空闲时间、主题、地点和经费偏好，我可以继续筛选。")
+        lines.append("\n告诉我院系、年级、空闲时间、主题、地点和经费偏好，我可以继续筛选。")
         return "\n".join(lines)
 
     def _welcome(self) -> str:
@@ -788,7 +939,7 @@ class PracticeChatAdapter:
         对话里没有那些表单，用户照着问必然扑空。承诺做不到的事比少说一项更伤。
         """
         sample = next(
-            (p["title"] for p in self.db.list_projects(include_expired=False)
+            (p["title"] for p in self._projects(include_expired=False)
              if p.get("status") == "published"),
             "",
         )
@@ -812,7 +963,7 @@ class PracticeChatAdapter:
         报名的项目列出来，用户至少不会空手离开。
         """
         openings = [
-            project for project in self.db.list_projects(include_expired=False)
+            project for project in self._projects(include_expired=False)
             if project.get("status") == "published"
         ][:3]
         lines = ["这句我没接住。我能帮的是清华社会实践这一块，比如："]

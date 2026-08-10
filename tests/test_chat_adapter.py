@@ -149,16 +149,56 @@ class ChatIntentTests(unittest.TestCase):
         quote = self.project["field_evidence"]["signup_deadline"]["quote"]
         self.assertIn(quote, result.content)
 
-    def test_next_step_hint_uses_a_real_project_not_a_hardcoded_one(self):
-        # 这句提示曾经写死了演示项目名，换成真实数据后会指向不存在的项目。
+    def test_next_step_hint_does_not_hardcode_a_project_title(self):
+        """引导语既不能写死演示项目名，也不能塞完整标题。
+
+        它曾经写死「滇西乡村教育数字化调研」，换真实数据后会指向不存在的项目；
+        后来改成引用当次头名，但真实通知的标题有三四十字
+        （「关于组建2026年赴湖南省湘西州花垣县开展……支队的通知」），
+        照着这句说没人打得出来。现在用序号指代。
+        """
         result = self.reply("我大三，八月有空，推荐实践")
         self.assertEqual(result.intent, "recommend")
+        tail = result.content[-220:]
         titles = [p["title"] for p in self.adapter.db.list_projects()]
-        tail = result.content[-200:]
-        self.assertTrue(
+        self.assertFalse(
             any(title in tail for title in titles),
-            f"推荐结尾的引导语没有引用任何真实项目：{tail}",
+            f"引导语里塞了完整项目标题，用户打不出来：{tail}",
         )
+        self.assertIn("第一个", tail)
+
+    def test_partial_title_finds_the_project(self):
+        """真实标题三四十字，学生只会说其中几个字。
+
+        原来要求整个标题是用户输入的子串，在真实数据下这条路等于不通。
+        """
+        title = self.project["title"]
+        fragment = title[2:8] if len(title) >= 8 else title
+        result = self.reply(f"{fragment}那个项目")
+        self.assertIn(result.intent, {"project_detail", "project_candidates"})
+        self.assertNotEqual(result.intent, "fallback")
+
+    def test_ambiguous_fragment_lists_candidates_instead_of_guessing(self):
+        db = self.adapter.db
+        base = db.get_project(self.project["id"])
+        for suffix in ("甲队", "乙队"):
+            clone = json.loads(json.dumps(base))
+            clone["id"] = f"{base['id']}_{suffix}"
+            clone["title"] = f"赴同一个地方开展同一主题调研支队{suffix}"
+            db.upsert_project(clone, note="测试用重名项目", log_activity=False)
+        result = self.reply("同一主题调研支队")
+        self.assertEqual(result.intent, "project_candidates")
+        self.assertIn("甲队", result.content)
+        self.assertIn("乙队", result.content)
+
+    def test_uncertain_fields_are_shown_in_chinese(self):
+        # 抽取器内部是英文字段名，但这些名字会一路显示给学生看。
+        pending = [p for p in self.adapter.db.list_projects() if p.get("uncertain_fields")]
+        if not pending:
+            self.skipTest("演示数据里没有带待确认字段的项目")
+        content = self.reply("还有哪些实践机会").content
+        for bad in ("eligibility", "reimbursement", "signup_method", "practice_dates"):
+            self.assertNotIn(bad, content)
 
     def test_welcome_does_not_promise_itinerary_in_chat(self):
         # 行程需要先勾选点位和住宿位置，对话里做不到；承诺了就是骗用户扑空。
