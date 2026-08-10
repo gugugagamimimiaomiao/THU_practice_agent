@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+import llm
 from database import Database
 from domain import deep_merge, extract_project, generate_asset, now_iso, recommend_local_sites, recommend_projects
 from chat_adapter import (
@@ -220,6 +221,9 @@ class Handler(BaseHTTPRequestHandler):
                 "version": "1.0.0",
                 "environment": "production" if is_production() else "development",
                 "database": str(DB.path),
+                # 写作模型只影响推送文案这一个能力，用不了会自动降级到要点清单，
+                # 所以它不参与整体健康判定——但要能一眼看出配没配、配的是哪家。
+                "writing_model": llm.status(),
                 "time": now_iso(),
             }, 200 if ready or not is_production() else 503)
             return
@@ -290,7 +294,8 @@ class Handler(BaseHTTPRequestHandler):
             note = {"intent": result.intent, "project_id": result.project_id}
             if max_tokens is not None:
                 note["max_tokens"] = max_tokens
-                note["truncated"] = truncate_to_tokens(result.content, max_tokens)[1]
+                if result.stream_factory is None:
+                    note["truncated"] = truncate_to_tokens(result.content, max_tokens)[1]
             DB.log("chat", f"完成清小搭对话：{result.intent}", note)
             if stream:
                 self.send_response(200)
@@ -300,12 +305,14 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("X-Accel-Buffering", "no")
                 self.send_header("X-Request-ID", self.request_id)
                 self.end_headers()
-                for event in stream_events(messages, result.content, model, max_tokens=max_tokens):
+                # 走大模型的回复用分片工厂，边生成边转发；规则类回复仍是整段字符串。
+                source = result.stream_factory() if result.stream_factory else result.content
+                for event in stream_events(messages, source, model, max_tokens=max_tokens):
                     self.wfile.write(event.encode("utf-8"))
                     self.wfile.flush()
                 self.close_connection = True
                 return
-            self.json_response(completion_payload(messages, result.content, model, max_tokens=max_tokens))
+            self.json_response(completion_payload(messages, result.resolve(), model, max_tokens=max_tokens))
             return
         self.require_admin_auth()
         payload = self.read_json()

@@ -167,6 +167,70 @@ class ChatIntentTests(unittest.TestCase):
         self.assertNotIn("生成报名陈述、外联话术、访谈提纲、行程", content)
 
 
+class DraftPostTests(unittest.TestCase):
+    """写推送文案是唯一走大模型的能力，重点守住"模型挂了不能报错"。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.adapter = PracticeChatAdapter(Database(Path(self.tmp.name) / "post.db"))
+        self.project = next(
+            p for p in self.adapter.db.list_projects() if p["status"] == "published"
+        )
+        self._enabled = chat_adapter.llm.is_enabled
+        self._stream = chat_adapter.llm.stream
+
+    def tearDown(self):
+        chat_adapter.llm.is_enabled = self._enabled
+        chat_adapter.llm.stream = self._stream
+        self.tmp.cleanup()
+
+    def reply(self, text):
+        return self.adapter.reply([{"role": "user", "content": text}])
+
+    def test_without_a_model_it_returns_an_outline_not_an_error(self):
+        chat_adapter.llm.is_enabled = lambda: False
+        result = self.reply(f"帮我写{self.project['title']}的推送文案")
+        self.assertEqual(result.intent, "draft_post_fallback")
+        content = result.resolve()
+        self.assertIn("推送要点", content)
+        # 降级也必须带上已核验的事实，用户拿到手就能改写。
+        self.assertIn(self.project["signup_deadline"], content)
+
+    def test_model_output_is_streamed_and_carries_a_disclaimer(self):
+        chat_adapter.llm.is_enabled = lambda: True
+        chat_adapter.llm.stream = lambda *a, **k: iter(["一起去", "滇西看看"])
+        result = self.reply(f"帮我写{self.project['title']}的推送文案")
+        self.assertEqual(result.intent, "draft_post")
+        self.assertIsNotNone(result.stream_factory)
+        content = result.resolve()
+        self.assertIn("一起去滇西看看", content)
+        self.assertIn("发布前请逐条核对原文通知", content)
+
+    def test_model_failure_falls_back_instead_of_raising(self):
+        chat_adapter.llm.is_enabled = lambda: True
+
+        def boom(*_args, **_kwargs):
+            raise chat_adapter.llm.LLMUnavailable("模型返回 HTTP 401")
+            yield  # pragma: no cover - 让它是个生成器
+
+        chat_adapter.llm.stream = boom
+        content = self.reply(f"帮我写{self.project['title']}的推送文案").resolve()
+        self.assertIn("推送要点", content)
+        self.assertIn("401", content)
+
+    def test_post_intent_wins_over_generic_write_wording(self):
+        # 「帮我写推送」里的"帮我写"也在生成材料词表里，顺序错了就会去出报名表建议。
+        chat_adapter.llm.is_enabled = lambda: False
+        self.assertIn(
+            self.reply(f"帮我写{self.project['title']}的推送").intent,
+            {"draft_post", "draft_post_fallback"},
+        )
+
+    def test_asking_for_a_post_without_naming_a_project(self):
+        chat_adapter.llm.is_enabled = lambda: False
+        self.assertEqual(self.reply("帮我写个推送文案").intent, "draft_post_needs_project")
+
+
 class MonthSpanTests(unittest.TestCase):
     """月份要跟着当前年份走。项目里已经因为写死日期栽过两次。"""
 

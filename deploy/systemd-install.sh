@@ -66,6 +66,35 @@ StandardError=append:/var/log/practice-xiaoda.log
 WantedBy=multi-user.target
 EOF
 
+# --- 自检定时任务 -------------------------------------------------------
+# 进程活着不等于能服务，所以每分钟真的打一次对话接口。
+# 连续失败 3 次才告警；配了 HEALTH_ALERT_SCKEY 就推到微信，没配只写日志。
+if [ -f "$APP_DIR/deploy/healthcheck.sh" ]; then
+  chmod +x "$APP_DIR/deploy/healthcheck.sh"
+  cat > /etc/systemd/system/practice-xiaoda-health.service <<EOF
+[Unit]
+Description=Practice Xiaoda health probe
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/env bash $APP_DIR/deploy/healthcheck.sh
+EOF
+  cat > /etc/systemd/system/practice-xiaoda-health.timer <<'EOF'
+[Unit]
+Description=Run the Practice Xiaoda health probe every minute
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target
+EOF
+  systemctl daemon-reload
+  systemctl enable --now practice-xiaoda-health.timer >/dev/null 2>&1 || true
+fi
+
 systemctl daemon-reload
 systemctl enable practice-xiaoda >/dev/null 2>&1 || true
 systemctl restart practice-xiaoda

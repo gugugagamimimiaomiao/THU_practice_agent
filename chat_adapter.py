@@ -15,8 +15,9 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import date
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
+import llm
 from database import Database
 from domain import (
     GRADE_TERMS,
@@ -46,6 +47,18 @@ class ChatResult:
     content: str
     intent: str
     project_id: str | None = None
+    # 需要边生成边输出时（目前只有走大模型的写作类回复）填这个：一个每次调用
+    # 都返回全新分片迭代器的工厂。规则类回复保持 None，直接用 content。
+    # 用工厂而不是迭代器本身，是因为迭代器只能消费一次，而重试/非流式取全文
+    # 都需要重新拿一份。
+    stream_factory: Callable[[], Iterable[str]] | None = None
+
+    def resolve(self) -> str:
+        """非流式场景下取完整文本。"""
+        if self.stream_factory is None:
+            return self.content
+        collected = "".join(self.stream_factory())
+        return collected or self.content
 
 
 def content_to_text(content: Any) -> tuple[str, bool]:
@@ -195,14 +208,19 @@ def _chunks(text: str, size: int = 36) -> Iterable[str]:
 
 def stream_events(
     messages: list[dict[str, Any]],
-    response: str,
+    response: str | Iterable[str],
     model: str,
     *,
     max_tokens: int | None = None,
 ) -> Iterable[str]:
+    """把回复转成 SSE 帧。
+
+    response 可以是完整字符串（规则类回复，一次性有全文），也可以是分片迭代器
+    （走大模型时边生成边转发）。后者是为了不让用户盯着十几秒的白屏——首个分片
+    到达的时间才是感知到的响应速度。
+    """
     completion_id = f"chatcmpl-pxd-{uuid.uuid4().hex[:20]}"
     created = int(time.time())
-    response, truncated = truncate_to_tokens(response, max_tokens)
 
     def event(delta: dict[str, Any], finish_reason: str | None, usage: dict[str, int] | None = None) -> str:
         payload: dict[str, Any] = {
@@ -220,9 +238,47 @@ def stream_events(
     # The guide requires exactly one role-only first frame.  Keep content
     # deltas separate so strict SSE clients can distinguish the two phases.
     yield event({"role": "assistant"}, None)
-    for chunk in _chunks(response):
-        yield event({"content": chunk}, None)
-    yield event({}, "length" if truncated else "stop", usage_for(messages, response))
+
+    emitted: list[str] = []
+    truncated = False
+    budget_used = 0
+
+    def emit(piece: str) -> Iterable[str]:
+        """按 max_tokens 预算发出一段内容，返回要 yield 的帧。"""
+        nonlocal truncated, budget_used
+        if truncated or not piece:
+            return
+        if max_tokens is not None:
+            remaining = max_tokens - budget_used
+            if remaining <= 0:
+                truncated = True
+                return
+            piece, cut = truncate_to_tokens(piece, remaining)
+            if cut:
+                truncated = True
+            if not piece:
+                return
+            budget_used += approximate_tokens(piece)
+        emitted.append(piece)
+        yield event({"content": piece}, None)
+
+    if isinstance(response, str):
+        for chunk in _chunks(response):
+            yield from emit(chunk)
+            if truncated:
+                break
+    else:
+        # 分片来源：模型给多少就转发多少，不缓冲到全文再发。
+        for piece in response:
+            for sub in _chunks(piece):
+                yield from emit(sub)
+                if truncated:
+                    break
+            if truncated:
+                break
+
+    full = "".join(emitted)
+    yield event({}, "length" if truncated else "stop", usage_for(messages, full))
     yield "data: [DONE]\n\n"
 
 
@@ -246,6 +302,10 @@ RECOMMEND_WORDS = (
     # 学生常见的自然说法，往往一个"推荐"都不带：
     # 「我八月有空，想去云南做实践」——意图很明确，以前却掉兜底。
     "想找", "想去", "想参加", "想报", "有空", "有时间", "空闲", "能参加",
+)
+POST_WORDS = (
+    "推送", "推文", "公众号文案", "宣传稿", "宣传文案", "招募文案",
+    "招募推送", "朋友圈文案", "宣传推送",
 )
 DETAIL_WORDS = ("详情", "介绍", "资格", "截止", "报销", "地点", "时间", "这个项目", "怎么样", "什么条件")
 LIST_WORDS = (
@@ -299,6 +359,10 @@ class PracticeChatAdapter:
 
         if self._is_import(latest):
             return self._import_notice(latest)
+        # 推送文案必须排在 GENERATE_WORDS 之前：「帮我写推送」里的"帮我写"
+        # 也在生成材料的词表里，先匹配到就会去出报名表建议了。
+        if any(word in latest for word in POST_WORDS):
+            return self._draft_post(messages, all_user_text, latest)
         if any(word in latest for word in GENERATE_WORDS):
             return self._generate(messages, all_user_text, latest)
         if any(word in latest for word in ["比较", "对比", "哪个好", "区别", "选哪个"]):
@@ -514,6 +578,105 @@ class PracticeChatAdapter:
         }.get(kind)
         hint = f"\n\n还可以为这个项目生成：{siblings}。" if siblings else ""
         return ChatResult(result["content"] + warnings + hint, f"generate_{kind}", project["id"])
+
+    _POST_SYSTEM_PROMPT = (
+        "你在帮清华大学的学生给一次社会实践招募写公众号推送文案。\n"
+        "硬性要求：\n"
+        "1. 只使用【项目事实】里给出的信息。时间、地点、报名截止、参与资格、"
+        "报销条件这些一个字都不能改，也不能补充里面没有的内容。\n"
+        "2. 【项目事实】里标着「待确认」的字段，就在文中写成待定并提示读者以原文通知为准，"
+        "绝对不要为了通顺而编一个具体值。\n"
+        "3. 不要编造带队老师姓名、往届成果、报名人数、获奖情况这类没给你的细节。\n"
+        "4. 面向清华在校生，语气真诚具体，别用空泛的口号堆砌。\n"
+        "输出结构：一个标题（15 字以内）、一段引入、项目要点、报名方式与截止提醒。"
+        "用 Markdown，总长 400-700 字。"
+    )
+
+    def _draft_post(self, messages: list[dict[str, Any]], all_user_text: str, latest: str) -> ChatResult:
+        """写公众号推送文案——目前唯一走大模型的能力。
+
+        分工是刻意的：项目事实全部来自已核验的项目卡（规则 + SQLite），
+        模型只负责把这些事实组织成通顺的文字。模型不可用时回落到要点清单，
+        用户仍然拿得到能用的东西，而不是一个报错。
+        """
+        project = self._resolve_project(messages, latest)
+        if not project:
+            return ChatResult(
+                "先告诉我给哪个项目写推送——说出项目名就行。"
+                "我需要把文案绑定到已核验的时间、地点、资格和报名要求上，不能凭空写。",
+                "draft_post_needs_project",
+            )
+        facts = self._project_facts_block(project)
+
+        if not llm.is_enabled():
+            return ChatResult(
+                self._post_outline(project, facts, reason="当前没有配置写作模型"),
+                "draft_post_fallback",
+                project["id"],
+            )
+
+        header = f"# {project['title']}｜推送文案草稿\n\n"
+        user_prompt = f"【项目事实】\n{facts}\n\n请据此写推送文案。"
+
+        def produce() -> Iterable[str]:
+            yield header
+            produced_any = False
+            try:
+                for piece in llm.stream(self._POST_SYSTEM_PROMPT, user_prompt):
+                    produced_any = True
+                    yield piece
+            except llm.LLMUnavailable as exc:
+                reason = f"写作模型这次没能用上（{exc}）"
+                # 已经吐出去的字收不回来。如果模型一个字都没给，就直接接要点清单；
+                # 如果已经写了一半才断，加条分隔线说明后面是降级内容，
+                # 而不是假装那半截是完整文案。
+                if produced_any:
+                    yield "\n\n---\n\n"
+                yield self._post_outline(project, facts, reason=reason)
+                return
+            yield (
+                "\n\n---\n"
+                "> 以上文案由模型基于已核验的项目卡生成，发布前请逐条核对原文通知；"
+                "带「待确认」的字段务必自行补全。"
+            )
+
+        return ChatResult("", "draft_post", project["id"], stream_factory=produce)
+
+    @staticmethod
+    def _project_facts_block(project: dict[str, Any]) -> str:
+        location = (project.get("location") or {}).get("detail") or "待确认"
+        eligibility = (project.get("eligibility") or {}).get("restriction_text") or "待确认"
+        reimbursement = (project.get("reimbursement") or {}).get("text") or "待确认"
+        return "\n".join([
+            f"项目名称：{project.get('title')}",
+            f"主办方：{project.get('organizer') or '待确认'}",
+            f"项目简介：{project.get('summary') or '待确认'}",
+            f"实践时间：{project.get('practice_start') or '待确认'} 至 {project.get('practice_end') or '待确认'}",
+            f"实践地点：{location}",
+            f"参与资格：{eligibility}",
+            f"报名截止：{project.get('signup_deadline') or '待确认'}",
+            f"报名方式：{project.get('signup_method') or '待确认'}",
+            f"经费与报销：{reimbursement}",
+            f"主题标签：{'、'.join(project.get('theme_tags') or []) or '待确认'}",
+            f"待确认字段：{'、'.join(project.get('uncertain_fields') or []) or '无'}",
+        ])
+
+    @staticmethod
+    def _post_outline(project: dict[str, Any], facts: str, *, reason: str) -> str:
+        """模型不可用时的兜底：给要点和写作提纲，不是报错。"""
+        return (
+            f"# {project['title']}｜推送要点\n\n"
+            f"> {reason}，这里先给你一份可以直接改写的要点清单。\n\n"
+            "**建议结构**\n"
+            "1. 标题：项目名 + 一个具体的吸引点（地点、主题或成果）\n"
+            "2. 引入：这次实践要解决或了解什么问题\n"
+            "3. 项目要点：时间、地点、内容安排\n"
+            "4. 招募：面向谁、需要什么准备\n"
+            "5. 结尾：报名方式与截止时间，单独一行加粗\n\n"
+            "**可直接引用的已核验事实**\n\n"
+            f"{facts}\n\n"
+            "> 以上字段来自项目卡；标着「待确认」的请先核对原文通知再写进文案。"
+        )
 
     def _compare(self, messages: list[dict[str, Any]], text: str) -> ChatResult:
         projects = self.db.list_projects(include_expired=True)
