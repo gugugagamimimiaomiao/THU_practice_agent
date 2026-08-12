@@ -2,7 +2,7 @@
 
 面向清华学生的社会实践机会决策与行动助手。它将公众号文章、复制通知、截图 OCR 文本和管理员投稿转换为带原文证据的项目卡，先对截止日期、时间冲突和资格限制执行硬过滤，再按主题、地点、经费与信息完整度给出个性化推荐，并继续生成报名、外联、访谈、行程和报告草稿。
 
-本项目是可运行的比赛 MVP，不依赖第三方 Python 或 JavaScript 包。
+本项目是可运行的比赛 MVP。**核心服务只用 Python 标准库**，不引入任何第三方 Python 或 JavaScript 包——推荐、过滤、检索、HTTP 服务、SQLite 存取全部如此。唯一的例外是抓取公众号配图的可选脚本 `scripts/wechat_image_fetch.py` 用到 `requests`，它写在 `try` 内部，装不装都不影响主流程。
 
 ### 行动工作台的交通查询（可选）
 
@@ -12,7 +12,7 @@
 
 ## 立即运行
 
-只需要 Python，**不装任何第三方包**。已在 Python 3.10 和 3.13 上验证通过。
+只需要 Python，跑起来**不用装任何包**。已在 Python 3.10 和 3.13 上验证通过。
 
 macOS / Linux：
 
@@ -109,6 +109,40 @@ python3 server.py --port 8765 # Windows PowerShell: py server.py --port 8765
 - 只给 `mp.weixin.qq.com` 公众号链接时，系统先自动读取公开正文并生成项目卡；验证、频控、视频/特殊图文或正文不可读时，系统保存链接并返回 `fetch_failed`，不会宣称读过文章。
 - 动态项目使用 SQLite 精确查询；静态调研写作资料应通过独立 RAG 知识库接入。
 
+## 写作模型：只用来「写」，不用来「判断」
+
+系统可以接入一个 OpenAI 协议的大模型（默认 DeepSeek），配置 `DEEPSEEK_API_KEY` 即启用。
+
+**它的职责边界是硬性的**：所有事实——有哪些项目、报名截止是哪天、谁能报、报销多少——一律来自 SQLite 里人工核验过的项目卡，模型碰不到也改不了。模型只负责把已经确定的事实写成通顺的推送文案、外联邮件、访谈提纲。
+
+这样划分是因为项目的核心承诺是「不编」。让模型参与事实判断，就等于把一个会流畅地说出错误截止日期的部件放进了链路里。
+
+不配 Key 也能跑：写作类请求会降级成结构化要点清单，功能不消失，只是不那么好读。模型超时或报错时同样降级，不会把错误抛给用户。
+
+## 运维：线上跑起来之后
+
+`deploy/systemd-install.sh` 会一次性装好三样东西：
+
+| | 频率 | 做什么 |
+|---|---|---|
+| 主服务 | 常驻 | `python3 -u server.py`，异常退出 1 秒后自动拉起 |
+| 健康自检 | 每分钟 | 真的打一次对话接口（进程活着不等于能服务）。连续失败 3 次才告警，配了 `HEALTH_ALERT_SCKEY` 就推微信 |
+| 数据库备份 | 每日 04:30 | 用 SQLite 的 backup API 而非 `cp`（服务随时在写，直接复制可能拷到写了一半的状态），gzip 后做一次 `integrity_check`，保留 14 天 |
+
+外加 logrotate：自检每分钟一条日志，一天一千四百多行，磁盘写满时 SQLite 的报错很难读懂，不如提前压住。
+
+看当前状态用一条命令：
+
+```bash
+python3 scripts/ops_report.py            # 最近 24 小时
+python3 scripts/ops_report.py --hours 72
+python3 scripts/ops_report.py --json     # 给脚本用
+```
+
+它汇总服务与定时器状态、磁盘、模型可用性、自检成败、备份新鲜度、项目库健康度（演示数据占比、缺字段分布、待核验积压）、对话量与兜底率、**没接住的问题原话**、请求来源分布。异常项自己标出来。
+
+写这个脚本是有教训的：排查「平台到底有没有转发请求」时，用 `grep` 过滤日志得到空结果就下了结论，没注意到日志含中文、`grep` 按二进制处理并给了 `binary file matches` 警告——空输出不等于没有匹配；而且当时的访问日志压根不记来源 IP，这个判断从一开始就做不到。所以这个脚本读日志不走 `grep`，遇到不含来源 IP 的旧格式日志会直接说「无法区分请求来源」，而不是给一个看起来很确定的 0。
+
 ## 主要 API
 
 | 方法 | 路径 | 功能 |
@@ -178,11 +212,17 @@ THU_practice_agent/
 ├── server.py                 # HTTP API 与静态站点
 ├── domain.py                 # 抽取、状态、推荐、材料生成规则
 ├── database.py               # SQLite 与版本/反馈记录
+├── chat_adapter.py           # 清小搭对话适配：意图识别与回答组织
+├── llm.py                    # 可选写作模型客户端（仅标准库实现）
 ├── seed_data.json            # 明确标注的演示项目
 ├── static/                   # 完整响应式前端
+├── deploy/                   # systemd 安装、健康自检、数据库备份
+├── scripts/ops_report.py     # 一条命令查看线上运行状态
+├── scripts/bulk_import_links.py  # 批量导入公众号链接（可断点续跑）
 ├── Dockerfile + compose.yaml # 容器化与持久 SQLite 卷
 ├── compose.public.yaml        # 公网 HTTPS（Caddy）覆盖配置
 ├── DEPLOYMENT.md              # 清小搭与云平台部署说明
+├── reports/                  # 121 轮浏览器黑盒测试记录（回归基线）
 ├── tests/                    # 单元与静态流程测试
 └── skills/practice-xiaoda/   # 清小搭/Codex 标准 Skill 包
 ```
