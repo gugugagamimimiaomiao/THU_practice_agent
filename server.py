@@ -161,6 +161,11 @@ class Handler(BaseHTTPRequestHandler):
             self.json_response({"error": str(exc)}, 422)
         except BrokenPipeError:
             pass
+        except (ConnectionResetError, BrokenPipeError):
+            # 客户端提前断开——用户关掉页面、网络抖动、或者公网上的扫描器
+            # 打完就跑。这是预期内的，不是故障；打整段 traceback 只会把日志刷脏，
+            # 真出问题时反而看不见。连接都没了，也没法再回什么给对方。
+            self.close_connection = True
         except Exception as exc:  # pragma: no cover - final API boundary
             traceback.print_exc()
             self.json_response({"error": "服务器处理失败", "details": str(exc)}, 500)
@@ -300,6 +305,14 @@ class Handler(BaseHTTPRequestHandler):
                     note["max_tokens"] = max_tokens
                     if result.stream_factory is None:
                         note["truncated"] = truncate_to_tokens(result.content, max_tokens)[1]
+                # 没接住的问题要留下原话，否则只知道"兜底率 12%"却不知道该补什么。
+                # 只记未命中的这一类，且截断到 80 字——够看出意图，不留完整聊天记录。
+                if result.intent in {"fallback", "writing_help", "about_practice"}:
+                    latest_user = next(
+                        (m["content"] for m in reversed(messages) if m["role"] == "user" and m["content"].strip()),
+                        "",
+                    )
+                    note["asked"] = latest_user.strip()[:80]
                 DB.log("chat", f"完成清小搭对话：{result.intent}", note)
             if stream:
                 self.send_response(200)
