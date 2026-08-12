@@ -42,14 +42,23 @@ class PushFailed(RuntimeError):
     """服务端明确拒绝，或重试若干次仍未成功。"""
 
 
-def push_article(article: dict, *, url: str = "", key: str = "", retries: int = 3, timeout: int = 30) -> dict:
+def push_article(article: dict, *, correction: bool = False, url: str = "",
+                 key: str = "", retries: int = 3, timeout: int = 30) -> dict:
     """推送一篇文章，返回服务端的结果。
 
     返回里的 status 有三种：
-      imported        —— 已生成待核验的项目卡
+      imported        —— 已生成项目卡
       not_opportunity —— 存了原文，但判定不是招募（纪实/回顾/行前预告）
       needs_text      —— 只收到链接没有正文，存成了待补线索
     后两种都不是错误，不用重试，也不用改内容再发一遍。
+
+    correction=True 用于订正一篇已经推过的文章：主办方改了通知（延期、名额
+    调整、资格放宽），或者你发现之前那版正文抓漏了。
+
+    平时重复推送同一条是安全的——按 source_url 认成同一个项目，只补不覆盖，
+    不会重复出现在推荐里。但正因为"只补不覆盖"，订正后的内容如果比原来少
+    （比如资格从"仅限计算机系"改成"面向全校"），默认会被挡回去。这时候要
+    带上 correction=True，表示以这一版为准。
     """
     url = url or os.getenv("XIAODA_INGEST_URL") or DEFAULT_URL
     key = key or os.getenv("XIAODA_INGEST_KEY", "")
@@ -59,7 +68,10 @@ def push_article(article: dict, *, url: str = "", key: str = "", retries: int = 
     if missing:
         raise PushFailed(f"缺字段：{'、'.join(missing)}")
 
-    body = json.dumps({**article, "input_type": "copied_text"}, ensure_ascii=False).encode("utf-8")
+    request_body = {**article, "input_type": "copied_text"}
+    if correction:
+        request_body["correction"] = True
+    body = json.dumps(request_body, ensure_ascii=False).encode("utf-8")
     # 不走系统代理。本机代理常把内网/裸 IP 一起劫走，表现成莫名其妙的 502。
     opener = build_opener(ProxyHandler({}))
 
@@ -99,13 +111,17 @@ def main() -> int:
         if not line.strip() or line.lstrip().startswith("//"):
             continue
         try:
-            result = push_article(json.loads(line))
+            record = json.loads(line)
+            # 文件里也可以写 "correction": true，逐条标记哪些是订正。
+            result = push_article(record, correction=bool(record.pop("correction", False)))
         except (PushFailed, json.JSONDecodeError) as exc:
             failed += 1
             print(f"  第 {number} 行  失败：{exc}")
             continue
         ok += 1
         status = result.get("status", "?")
+        if result.get("corrected"):
+            status = "corrected"
         title = (result.get("project") or {}).get("title", "")
         print(f"  第 {number} 行  {status:<16} {title[:30]}")
         time.sleep(0.3)  # 别把服务刷满，评审期间它同时在给用户服务

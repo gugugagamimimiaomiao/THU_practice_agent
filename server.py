@@ -490,6 +490,10 @@ class Handler(BaseHTTPRequestHandler):
             collector_status="success",
             log_channel="lead",
             origin_label="手动导入",
+            # correction=true 表示"这次是订正，以我为准"。默认的合并是补充，
+            # 会挡下信息量下降的版本——而订正（延期、资格放宽、之前抽错了）
+            # 恰恰常常更少，不给这个开关的话订正会悄悄失效。
+            correction=bool(payload.get("correction")),
         )
         self.json_response(result, 201 if result["status"] == "imported" else 202)
 

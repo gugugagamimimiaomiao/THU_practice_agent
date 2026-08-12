@@ -12,9 +12,17 @@ from urllib.request import ProxyHandler, Request, build_opener
 # 这里显式使用空代理的 opener，让测试只依赖本进程启动的回环服务。
 _DIRECT = build_opener(ProxyHandler({}))
 
-import server as app_server
-from chat_adapter import PracticeChatAdapter
-from database import Database
+# 必须在 import server 之前把库路径指向临时目录。server 模块在导入时就会
+# 建立数据库连接（模块级 DB = Database()），路径取自 PRACTICE_XIAODA_DB。
+# 在服务器上带着生产环境变量跑测试时，这一步会直接落到线上库上——虽然测试
+# 里随后就把 DB 换成了临时库、请求打不到线上，但让测试碰到生产库这件事本身
+# 就不该发生。这两行的成本几乎为零。
+_TEST_DB_DIR = tempfile.mkdtemp(prefix="pxd-protocol-")
+os.environ["PRACTICE_XIAODA_DB"] = os.path.join(_TEST_DB_DIR, "import-time.db")
+
+import server as app_server  # noqa: E402
+from chat_adapter import PracticeChatAdapter  # noqa: E402
+from database import Database  # noqa: E402
 
 
 class ServerProtocolTests(unittest.TestCase):

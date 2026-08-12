@@ -115,6 +115,58 @@ class WeChatIngestTests(unittest.TestCase):
             self.assertNotIn("reimbursement", project["uncertain_fields"])
             self.assertNotIn("practice_dates", project["uncertain_fields"])
 
+    def test_marked_correction_overrides_even_when_it_says_less(self):
+        """数据维护方明确标记的订正必须生效，哪怕新版本信息更少。
+
+        订正常常"更少"：主办方把资格从「仅限环境学院」放宽成「面向全校」，
+        或者延期后重发了一版更短的通知。默认的补充式合并会判定成信息量下降
+        而挡回去——订正于是悄悄失效，而界面上一切看起来正常。
+        """
+        url = "https://mp.weixin.qq.com/s?mid=correction-case"
+        first = (
+            "现招募赴内蒙古草原生态调研支队队员。\n"
+            "实践地点：内蒙古自治区锡林郭勒盟\n"
+            "参与资格：仅限环境学院、地学系本科生\n"
+            "报名截止：2026年9月5日\n"
+            "经费说明：提供每人1200元交通补贴\n"
+            "报名方式：填写报名表发送至邮箱"
+        )
+        revised = (
+            "赴内蒙古草原生态调研支队报名延长通知。\n"
+            "实践地点：内蒙古自治区锡林郭勒盟\n"
+            "参与资格：面向全校，不限院系年级\n"
+            "报名截止：2026年9月20日\n"
+            "经费说明：提供每人1200元交通补贴\n"
+            "报名方式：填写报名表发送至邮箱"
+        )
+
+        def fetcher_for(text):
+            return lambda _: WeChatFetchResult(
+                True, url, text, "赴内蒙古草原生态调研支队招募", "清华大学社会实践", "2026-08-20", "direct"
+            )
+
+        with tempfile.TemporaryDirectory() as folder:
+            database = Database(Path(folder) / "test.db")
+            import_wechat_link(database, {"source_url": url}, fetcher=fetcher_for(first))
+
+            # 不带标记：走补充式合并，资格信息量下降会被挡住
+            import_wechat_link(database, {"source_url": url}, fetcher=fetcher_for(revised))
+            found = [p for p in database.list_projects() if p["source_url"] == url]
+            project = database.get_project(found[0]["id"])
+            self.assertIn("环境学院", project["eligibility"]["departments"], "默认合并不该让订正生效")
+            self.assertEqual(project["signup_deadline"], "2026-09-20", "截止日期是直接替换的，应当已更新")
+
+            # 带标记：整条以新版本为准
+            result = import_wechat_link(
+                database, {"source_url": url, "correction": True}, fetcher=fetcher_for(revised))
+            self.assertTrue(result["corrected"])
+            found = [p for p in database.list_projects() if p["source_url"] == url]
+            self.assertEqual(len(found), 1, "订正不该新开一条项目")
+            project = database.get_project(found[0]["id"])
+            self.assertEqual(project["eligibility"]["departments"], [], "订正后不该还挂着旧的院系限制")
+            self.assertTrue(project["eligibility"]["explicit_no_restriction"])
+            self.assertEqual(project["signup_deadline"], "2026-09-20")
+
 
 if __name__ == "__main__":
     unittest.main()
