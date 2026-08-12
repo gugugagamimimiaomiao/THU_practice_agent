@@ -111,6 +111,8 @@ def main() -> int:
     parser.add_argument("--report", type=Path, default=ROOT / "data" / "import_report.md")
     parser.add_argument("--allow-short", action="store_true",
                         help="放行过短正文（默认拦截，只在确认对方就是给了短通知时用）")
+    parser.add_argument("--review-all", action="store_true",
+                        help="强制全部进人工核验队列，不让任何一条直接进正式推荐")
     args = parser.parse_args()
 
     if not args.path.is_file():
@@ -189,9 +191,15 @@ def main() -> int:
         tally[status] += 1
         if status == "imported":
             project = result["project"]
+            if args.review_all and project["status"] == "published":
+                # 五项关键字段都抽到了就会自动发布。抽得"干净"不等于抽得对——
+                # 今天就修过三个抽出自信错值的 bug。头几批外部数据建议全过一遍人工。
+                project["status"] = "needs_review"
+                project = database.upsert_project(project, note="按 --review-all 强制进人工核验")
             imported.append(project)
             missing = "、".join(project.get("uncertain_fields", [])) or "无"
-            print(f"[{position}/{len(pending)}] 已导入  {project['title'][:28]}  待确认：{missing}")
+            mark = "待核验" if project["status"] == "needs_review" else "已发布"
+            print(f"[{position}/{len(pending)}] {mark}  {project['title'][:26]}  待确认：{missing}")
         else:
             reason = "；".join(result.get("decision_reasons", [])) or result.get("action_required", "")
             rejected.append((metadata["title"], reason))
@@ -201,21 +209,31 @@ def main() -> int:
     for status, count in tally.most_common():
         print(f"  {status}: {count}")
 
+    published = [p for p in imported if p["status"] == "published"]
+    reviewing = [p for p in imported if p["status"] == "needs_review"]
     write_report(args.report, imported, rejected, tally, problems, broken)
+    print(f"\n  其中已直接发布 {len(published)} 条，待人工核验 {len(reviewing)} 条")
+    if published:
+        # 这里必须说准。五项关键字段都抽到就会自动发布——"抽得干净"不等于"抽得对"。
+        print("  已发布的会立刻出现在推荐里。抽取干净不等于抽得对，")
+        print("  建议至少抽查报名截止和参与资格；想全部先过人工用 --review-all。")
     print(f"\n复核清单：{args.report}")
-    print("导入的项目都是 needs_review，人工核验通过后才进入正式推荐。")
     return 0
 
 
 def write_report(path: Path, imported: list[dict], rejected: list[tuple[str, str]],
                  tally: Counter, problems: dict[int, list[str]], broken: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    auto = sum(1 for p in imported if p["status"] == "published")
     lines = [
         f"# 采集文件导入复核清单（{datetime.now():%Y-%m-%d %H:%M}）",
         "",
-        "导入的项目一律是 `needs_review`，核验通过后才会进入正式推荐。",
         "**逐条打开原文核对报名截止和参与资格**——这两项写错的代价最大：",
         "截止日期错了会让人错过报名，资格写错会让人白准备一场。",
+        "",
+        f"五项关键字段都抽到的会自动进入正式推荐，本次有 **{auto}** 条属于这种情况；"
+        "其余进人工核验队列。抽得干净不等于抽得对，自动发布的那些同样建议抽查。",
+        "想让全部先过人工，导入时加 `--review-all`。",
         "",
         "## 汇总",
         "",

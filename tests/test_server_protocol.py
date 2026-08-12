@@ -24,6 +24,7 @@ class ServerProtocolTests(unittest.TestCase):
         os.environ["PRACTICE_XIAODA_ENV"] = "production"
         os.environ["XIAODA_API_KEY"] = "test-secret"
         os.environ["ADMIN_API_KEY"] = "admin-secret"
+        os.environ["INGEST_API_KEYS"] = "ingest-only-secret"
         os.environ["RATE_LIMIT_PER_MINUTE"] = "1000"
         cls.tempdir = tempfile.TemporaryDirectory()
         app_server.DB = Database(os.path.join(cls.tempdir.name, "protocol.db"))
@@ -160,6 +161,43 @@ class ServerProtocolTests(unittest.TestCase):
         status, _, body, _ = self.call("/api/projects", key="admin-secret")
         self.assertEqual(status, 200)
         self.assertIn("projects", json.loads(body))
+
+    def test_ingest_key_can_submit_articles_but_nothing_else(self):
+        """投稿密钥要发给校外协作的同学，所以它能开的门必须尽量少。
+
+        它只该开投稿这一道。如果哪天它也能改项目状态或导出整个项目库，
+        一次泄漏（写进公开仓库、贴进聊天记录）的后果就完全不同了。
+        """
+        article = {
+            "input_type": "copied_text",
+            "source_account": "清华大学社会实践",
+            "source_url": "https://mp.weixin.qq.com/s/ingest-scope-case",
+            "title": "赴内蒙古草原生态调研支队招募",
+            "publish_date": "2026-08-11",
+            "raw_text": (
+                "现面向全校招募赴内蒙古草原生态调研支队队员。\n"
+                "实践地点：内蒙古自治区锡林郭勒盟\n"
+                "报名截止：2026年9月5日\n"
+                "参与资格：全校本科生、研究生均可报名\n"
+                "报名方式：填写报名表并发送至邮箱"
+            ),
+        }
+        status, _, body, _ = self.call("/api/ingest", method="POST", payload=article, key="ingest-only-secret")
+        self.assertIn(status, {201, 202}, body[:200])
+        self.assertIn(json.loads(body)["status"], {"imported", "not_opportunity"})
+
+        # 同一把钥匙不该能读项目库、导出数据、或改项目。
+        for path, method, payload in [
+            ("/api/projects", "GET", None),
+            ("/api/export", "GET", None),
+            ("/api/recommend", "POST", {"profile": {}}),
+        ]:
+            status, _, _, _ = self.call(path, method=method, payload=payload, key="ingest-only-secret")
+            self.assertEqual(status, 401, f"{method} {path} 不该对投稿密钥开放")
+
+        # 没有密钥当然也进不来。
+        status, _, _, _ = self.call("/api/ingest", method="POST", payload=article, key=None)
+        self.assertEqual(status, 401)
 
 
 if __name__ == "__main__":

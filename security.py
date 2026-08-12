@@ -38,11 +38,15 @@ def bearer_token(header: str | None) -> str:
     return token.strip()
 
 
-def verify_bearer(header: str | None, *, admin: bool = False) -> bool:
+def verify_bearer(header: str | None, *, admin: bool = False, keys_env: str = "") -> bool:
     token = bearer_token(header)
     if not token:
         return False
-    if admin:
+    if keys_env:
+        # 指定环境变量的独立钥匙串（目前用于 INGEST_API_KEYS）。没配就是没开，
+        # 不回退到别的密钥——否则"我以为只发了投稿权限"会变成发了全部权限。
+        expected = [item.strip() for item in (os.getenv(keys_env) or "").split(",") if item.strip()]
+    elif admin:
         raw = os.getenv("ADMIN_API_KEYS") or os.getenv("ADMIN_API_KEY") or ""
         expected = [item.strip() for item in raw.split(",") if item.strip()]
         if not expected and not is_production():
