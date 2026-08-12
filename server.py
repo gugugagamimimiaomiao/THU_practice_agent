@@ -89,7 +89,11 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "PracticeXiaoda/1.0"
 
     def log_message(self, fmt: str, *args: Any) -> None:
-        sys.stdout.write(f"[{self.log_date_time_string()}] {fmt % args}\n")
+        # 带上来源地址：不然日志里分不出哪些是本机自检、哪些是平台转发过来的
+        # 真实对话、哪些是公网上的扫描器——上线后这三样会混在一起。
+        # 只记 IP 不记端口，够用来区分来源，也不额外留用户信息。
+        origin = self.client_address[0] if self.client_address else "-"
+        sys.stdout.write(f"[{self.log_date_time_string()}] {origin} {fmt % args}\n")
 
     def _headers(self, status: int, content_type: str, length: int | None = None) -> None:
         self.send_response(status)

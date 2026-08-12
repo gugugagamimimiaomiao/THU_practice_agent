@@ -52,7 +52,9 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=$APP_DIR
 EnvironmentFile=$ENV_FILE
-ExecStart=/usr/bin/python3 $APP_DIR/server.py --host 0.0.0.0 --port $PORT
+# -u 关掉输出缓冲。写文件时 Python 默认按块缓冲，排查问题时会发现日志停在
+# 一个多小时之前，误以为服务没在跑——正是遇到过的情况。
+ExecStart=/usr/bin/python3 -u $APP_DIR/server.py --host 0.0.0.0 --port $PORT
 Restart=always
 RestartSec=1
 # 服务收到 SIGTERM 后会停止接受新连接，并留几秒让进行中的响应写完，
