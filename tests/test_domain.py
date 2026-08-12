@@ -91,6 +91,48 @@ class ExtractionTests(unittest.TestCase):
         self.assertNotIn("practice_dates", project["uncertain_fields"])
 
 
+class FlattenedNoticeTests(unittest.TestCase):
+    """正文被压平成一整行、或资格标签不在关键词表里时的抽取。
+
+    两种都来自真实数据：转发版和采集器压平的正文常常丢掉换行；而「参与资格」
+    这个最常见的标签此前根本不在关键词表里，导致抽取器退而匹配开场白里的
+    「现面向全校招募……」，把整句套话当成了参与资格。
+    """
+
+    NOTICE = "\n".join([
+        "为引导同学在实践中了解国情民情，现面向全校招募赴云南乡村教育调研支队队员。",
+        "实践地点：云南省大理白族自治州",
+        "报名截止：2026年9月26日",
+        "参与资格：全校本科生、研究生均可报名，优先考虑教育学、社会学相关专业",
+    ])
+    FLAT = (
+        "为引导同学在实践中了解国情民情，现面向全校招募赴云南乡村教育调研支队队员。"
+        "报名截止：2026年9月26日。实践地点：云南省大理白族自治州。欢迎踊跃报名。"
+    )
+    META = {"title": "调研支队招募", "source_url": "https://mp.weixin.qq.com/s/case"}
+
+    def test_explicit_eligibility_label_beats_the_boilerplate_opening(self):
+        project = extract_project(self.NOTICE, self.META)
+        text = project["eligibility"]["restriction_text"]
+        self.assertIn("全校本科生", text)
+        self.assertNotIn("为引导同学", text, "抽到的是开场白套话，不是那一行参与资格")
+        self.assertIn("本科生", project["eligibility"]["grades"])
+
+    def test_flattened_body_does_not_swallow_neighbouring_sentences(self):
+        project = extract_project(self.FLAT, self.META)
+        detail = project["location"]["detail"]
+        self.assertEqual(detail, "云南省大理白族自治州")
+        self.assertNotIn("报名截止", detail, "地点字段里混进了别的字段")
+        self.assertLessEqual(len(detail), 40)
+
+    def test_absurdly_long_capture_is_dropped_rather_than_shown_as_confirmed(self):
+        # 抽不干净时宁可留空、进 uncertain_fields 让人工核验，也不要给出一个
+        # 看起来已确认、实际是一整段正文的字段。
+        runon = "本次活动地点安排如下所述并将于近期公布详细方案" + "另有若干补充说明" * 12
+        project = extract_project(runon, {"title": "无标签通知", "source_url": ""})
+        self.assertLessEqual(len(project["location"]["detail"]), 40)
+
+
 class NoticeLayoutTests(unittest.TestCase):
     """真实公众号排版的抽取。两种版式此前会整片抽错。"""
 
