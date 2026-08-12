@@ -324,9 +324,26 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 # 走大模型的回复用分片工厂，边生成边转发；规则类回复仍是整段字符串。
                 source = result.stream_factory() if result.stream_factory else result.content
+                # 规则类回复在几毫秒内就能把几十帧全写完再关连接。浏览器实测里
+                # 有一半的会话「内容都显示出来了，但页面的忙碌状态一直不解除」，
+                # 而且回答越长越容易触发（588 字 vs 289 字）——像是下游没跟上这种
+                # 瞬间灌完就断开的节奏。给规则类回复加一点点节流，让流的形态接近
+                # 真实生成；每帧 12ms，一段 600 字的回答也只多花 0.2 秒，用户感知不到。
+                # 走模型的回复本来就是逐段到达的，不额外加。
+                pace = 0.012 if result.stream_factory is None else 0.0
                 for event in stream_events(messages, source, model, max_tokens=max_tokens):
                     self.wfile.write(event.encode("utf-8"))
                     self.wfile.flush()
+                    if pace:
+                        time.sleep(pace)
+                # 把 data: [DONE] 真正推出去之后再关连接。写完立刻关闭时，
+                # 结束帧可能和 FIN 挤在一起，下游先看到连接断开、后处理缓冲，
+                # 就可能判定成异常中断而不是正常收尾。
+                try:
+                    self.wfile.flush()
+                except (ConnectionResetError, BrokenPipeError):
+                    pass
+                time.sleep(0.05)
                 self.close_connection = True
                 return
             self.json_response(completion_payload(messages, result.resolve(), model, max_tokens=max_tokens))
