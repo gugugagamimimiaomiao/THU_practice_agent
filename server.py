@@ -291,12 +291,16 @@ class Handler(BaseHTTPRequestHandler):
             # 记录 max_tokens：正常对话本不该带它。若平台网关某天开始下发一个
             # 默认上限，回复会被静默截断，这条日志能让我们立刻看出来，
             # 而不是等用户反馈"话说一半"。
-            note = {"intent": result.intent, "project_id": result.project_id}
-            if max_tokens is not None:
-                note["max_tokens"] = max_tokens
-                if result.stream_factory is None:
-                    note["truncated"] = truncate_to_tokens(result.content, max_tokens)[1]
-            DB.log("chat", f"完成清小搭对话：{result.intent}", note)
+            # 健康自检每分钟打一次真实对话，用来确认"进程活着"之外还"答得出来"。
+            # 但它不该写进活动日志——一天一千四百多条，真实用户的行为会被彻底淹没，
+            # 而活动日志正是我们之后判断"大家都在问什么"的唯一依据。
+            if self.headers.get("X-Health-Probe") != "1":
+                note = {"intent": result.intent, "project_id": result.project_id}
+                if max_tokens is not None:
+                    note["max_tokens"] = max_tokens
+                    if result.stream_factory is None:
+                        note["truncated"] = truncate_to_tokens(result.content, max_tokens)[1]
+                DB.log("chat", f"完成清小搭对话：{result.intent}", note)
             if stream:
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream; charset=utf-8")

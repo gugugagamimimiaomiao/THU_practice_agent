@@ -42,8 +42,11 @@ esac
 # 2) 真的走一遍对话（这才是用户实际用到的路径）
 if [ -z "$reason" ] && [ -n "${XIAODA_API_KEY:-}" ]; then
   body='{"model":"practice-xiaoda","max_tokens":8,"messages":[{"role":"user","content":"推荐实践"}]}'
+  # X-Health-Probe 让服务端知道这是自检，不要写进活动日志——
+  # 否则一天一千四百多条，真实用户的行为记录会被彻底淹没。
   code=$(curl -s --max-time 20 -o /tmp/pxd_health_body -w '%{http_code}' \
          -H "Authorization: Bearer $XIAODA_API_KEY" -H 'Content-Type: application/json' \
+         -H 'X-Health-Probe: 1' \
          -d "$body" "http://127.0.0.1:$PORT/v1/chat/completions" || echo 000)
   if [ "$code" != "200" ]; then
     reason="对话接口返回 HTTP $code"
