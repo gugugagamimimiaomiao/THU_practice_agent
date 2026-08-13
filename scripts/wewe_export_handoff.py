@@ -31,6 +31,8 @@ def main() -> int:
     parser.add_argument("--need", type=int, default=26)
     parser.add_argument("--database", type=Path, default=Path("data/practice_xiaoda.db"))
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--title-prefix", default="")
+    parser.add_argument("--exclude-jsonl", type=Path, action="append", default=[])
     args = parser.parse_args()
 
     feeds = get_json("/feeds")
@@ -40,12 +42,25 @@ def main() -> int:
     feed_id = str(feed.get("id"))
     metadata = get_json(f"/feeds/{quote(feed_id)}.json", {"limit": 100, "page": 1, "mode": "metadata"})
     seen = existing_urls(args.database)
+    for path in args.exclude_jsonl:
+        if not path.is_file():
+            continue
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(row, dict) and row.get("source_url"):
+                seen.add(str(row["source_url"]).strip())
     records: list[dict[str, object]] = []
     for index, item in enumerate(metadata.get("items", []), 1):
         if len(records) >= args.need:
             break
         publish_date = iso_date(str(item.get("date_modified") or ""))
         link = str(item.get("url") or "").strip()
+        title = str(item.get("title") or "").strip()
+        if args.title_prefix and not title.startswith(args.title_prefix):
+            continue
         if publish_date < args.since or not link.startswith("https://mp.weixin.qq.com/s/") or link in seen:
             continue
         full = get_json(f"/feeds/{quote(feed_id)}.json", {"limit": 1, "page": index, "mode": "fulltext"})
@@ -56,7 +71,7 @@ def main() -> int:
         record: dict[str, object] = {
             "source_account": args.account,
             "source_url": link,
-            "title": str(item.get("title") or "").strip(),
+            "title": title,
             "publish_date": publish_date,
             "raw_text": content,
         }
