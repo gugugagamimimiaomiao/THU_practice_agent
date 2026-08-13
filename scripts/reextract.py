@@ -29,6 +29,7 @@ sys.path.insert(0, str(ROOT))
 
 from database import Database  # noqa: E402
 from domain import extract_project  # noqa: E402
+from opportunity_filter import candidate_decision  # noqa: E402
 
 # 拿出来比对的字段。都是会直接影响"能不能报、报不报得上"的。
 WATCHED = (
@@ -72,6 +73,7 @@ def main() -> int:
     changed = 0
     skipped_no_text = 0
     skipped_status = 0
+    retired: list[str] = []
     tally_before: Counter[str] = Counter()
     tally_after: Counter[str] = Counter()
 
@@ -86,6 +88,18 @@ def main() -> int:
             continue
         if allowed is not None and project.get("status") not in allowed:
             skipped_status += 1
+            continue
+
+        # 分类规则也可能改。改严之后，之前放行的内容会变成"根本不该是项目卡"，
+        # 光重抽字段没用——那张卡还挂在机会库里冒充可报名项目，必须撤下来。
+        # 原文留在 articles 表里做审计，不删。
+        if not candidate_decision({"title": project.get("title", ""),
+                                   "content": article["raw_text"]})["candidate"]:
+            retired.append(project["title"])
+            print(f"── 撤下（现已判为非招募内容）  {project['title'][:46]}")
+            if args.apply:
+                database.delete_projects_by_source(url, note="分类规则更新后判定为非招募内容，撤出机会库")
+            print()
             continue
 
         fresh = extract_project(article["raw_text"], {
@@ -117,7 +131,8 @@ def main() -> int:
         print()
 
     print("=" * 66)
-    print(f"有变化 {changed} 条；跳过 {skipped_no_text} 条（找不到存档原文）、"
+    print(f"字段有变化 {changed} 条；撤下 {len(retired)} 条（现已判为非招募内容）")
+    print(f"跳过 {skipped_no_text} 条（找不到存档原文）、"
           f"{skipped_status} 条（状态不在 {args.only_status} 内）")
     print(f"状态分布  重抽前 {dict(tally_before)}")
     print(f"          重抽后 {dict(tally_after)}")
