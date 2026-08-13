@@ -30,6 +30,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import Iterator
 from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, Request, build_opener
 
@@ -40,6 +41,34 @@ RETRYABLE = {429, 500, 502, 503, 504}
 
 class PushFailed(RuntimeError):
     """服务端明确拒绝，或重试若干次仍未成功。"""
+
+
+def iter_json_records(text: str) -> Iterator[tuple[int, dict]]:
+    """Read JSONL, pretty-printed JSON objects, or a JSON array.
+
+    The returned number is the source line where each record starts so CLI
+    errors remain useful even when an object spans multiple lines.
+    """
+    decoder = json.JSONDecoder()
+    offset = 0
+    length = len(text)
+    while offset < length:
+        while offset < length and text[offset].isspace():
+            offset += 1
+        if offset >= length:
+            break
+        if text.startswith("//", offset):
+            newline = text.find("\n", offset)
+            offset = length if newline < 0 else newline + 1
+            continue
+        line = text.count("\n", 0, offset) + 1
+        value, end = decoder.raw_decode(text, offset)
+        values = value if isinstance(value, list) else [value]
+        for record in values:
+            if not isinstance(record, dict):
+                raise json.JSONDecodeError("article record must be an object", text, offset)
+            yield line, record
+        offset = end
 
 
 def push_article(article: dict, *, correction: bool = False, url: str = "",
@@ -107,14 +136,16 @@ def main() -> int:
         return 1
 
     ok = failed = 0
-    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-        if not line.strip() or line.lstrip().startswith("//"):
-            continue
+    try:
+        records = list(iter_json_records(path.read_text(encoding="utf-8")))
+    except json.JSONDecodeError as exc:
+        print(f"JSON 格式错误（第 {exc.lineno} 行）：{exc.msg}", file=sys.stderr)
+        return 1
+    for number, record in records:
         try:
-            record = json.loads(line)
             # 文件里也可以写 "correction": true，逐条标记哪些是订正。
             result = push_article(record, correction=bool(record.pop("correction", False)))
-        except (PushFailed, json.JSONDecodeError) as exc:
+        except PushFailed as exc:
             failed += 1
             print(f"  第 {number} 行  失败：{exc}")
             continue

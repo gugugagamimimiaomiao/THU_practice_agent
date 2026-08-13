@@ -10,10 +10,16 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+import sys
 from pathlib import Path
 from urllib.parse import quote
 
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "scripts"))
+
 from wewe_collector import extract_images, get_json, html_to_text, iso_date
+from domain import extract_project
 from opportunity_filter import candidate_decision
 
 
@@ -23,6 +29,21 @@ def existing_urls(database: Path) -> set[str]:
         return {str(row[0]) for row in connection.execute("SELECT source_url FROM articles WHERE source_url IS NOT NULL AND source_url != ''")}
     finally:
         connection.close()
+
+
+def is_current_opportunity(record: dict[str, object]) -> bool:
+    """Reject demo and expired records after the full body has been fetched."""
+    project = extract_project(
+        str(record.get("raw_text") or ""),
+        {
+            "input_type": "wechat_batch",
+            "source_account": str(record.get("source_account") or ""),
+            "source_url": str(record.get("source_url") or ""),
+            "title": str(record.get("title") or ""),
+            "publish_date": str(record.get("publish_date") or ""),
+        },
+    )
+    return not project.get("demo_data") and project.get("status") != "expired"
 
 
 def main() -> int:
@@ -94,6 +115,8 @@ def main() -> int:
             record["images"] = images
         if args.correction:
             record["correction"] = True
+        if not is_current_opportunity(record):
+            continue
         records.append(record)
         seen.add(link)
     args.output.parent.mkdir(parents=True, exist_ok=True)

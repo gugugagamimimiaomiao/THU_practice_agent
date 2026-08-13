@@ -121,6 +121,31 @@ class PublishGateTests(unittest.TestCase):
         project = extract_project(notice, self.META, today=date(2026, 8, 13))
         self.assertEqual(project["status"], "published")
 
+    def test_mixed_notice_uses_the_last_open_signup_deadline(self):
+        notice = "\n".join([
+            "篮球邀请赛预告、领票通知及志愿者招募",
+            "观众报名通道于8月12日23:00截止。",
+            "现面向全校同学招募志愿者，志愿工作时间为8月16日下午。",
+            "志愿者招募于8月14日12:00截止。",
+            "报名方式：扫描原文二维码。",
+        ])
+        project = extract_project(notice, self.META, today=date(2026, 8, 13))
+        self.assertEqual(project["signup_deadline"], "2026-08-14")
+        self.assertEqual(project["practice_start"], "2026-08-16")
+        self.assertEqual(project["practice_end"], "2026-08-16")
+        self.assertEqual(project["status"], "published")
+
+    def test_extracts_deadline_written_as_register_before_date(self):
+        notice = "\n".join([
+            "ICBS 2026 清华专场报名",
+            "时间：2026年8月15日9:30-17:30",
+            "请扫描二维码填写问卷报名",
+            "请于2026年8月14日上午10:00前扫码报名",
+        ])
+        project = extract_project(notice, self.META, today=date(2026, 8, 13))
+        self.assertEqual(project["signup_deadline"], "2026-08-14")
+        self.assertEqual(project["status"], "published")
+
     def test_lead_in_line_is_not_mistaken_for_the_eligibility(self):
         """「报名要求：我们希望你是：」本身不含条件，真正的条件在后面几行。
 
