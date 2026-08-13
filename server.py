@@ -25,7 +25,7 @@ from urllib.parse import parse_qs, urlparse
 
 import llm
 from database import Database
-from domain import deep_merge, extract_project, generate_asset, now_iso, recommend_local_sites, recommend_projects
+from domain import generate_asset, now_iso, recommend_local_sites, recommend_projects
 from chat_adapter import (
     ChatRequestError,
     PracticeChatAdapter,
@@ -44,10 +44,9 @@ from security import (
     token_fingerprint,
     verify_bearer,
 )
-from wechat_ingest import collector_credentials_present, import_wechat_link
+from wechat_ingest import collector_credentials_present, import_article_text, import_wechat_link
 from collector_scheduler import DailyCollectorScheduler
 from collector_settings import credentials as collector_credentials, delete_profile, public_status, save_from_developer, select_profile
-from opportunity_filter import candidate_decision
 from route_lookup import query_routes
 from wechat_sources import MAX_ACCOUNTS
 
@@ -210,6 +209,19 @@ class Handler(BaseHTTPRequestHandler):
         if is_production() and not verify_bearer(self.headers.get("Authorization"), admin=True):
             raise APIError(401, "生产模式下访问管理 API 需要 ADMIN_API_KEY")
 
+    def require_ingest_auth(self) -> None:
+        """投稿口的鉴权：INGEST_API_KEYS 或 ADMIN_API_KEY 都可以。
+
+        分开是为了能把投稿权限单独发出去。管理密钥同时能改项目状态、修改字段、
+        导出整个项目库；而负责爬取的同学只需要能送文章进来。
+        """
+        if not is_production():
+            return
+        header = self.headers.get("Authorization")
+        if verify_bearer(header, admin=True) or verify_bearer(header, keys_env="INGEST_API_KEYS"):
+            return
+        raise APIError(401, "投稿需要 INGEST_API_KEYS 或 ADMIN_API_KEY")
+
     def do_GET(self) -> None:
         self.safe(self.handle_get)
 
@@ -353,11 +365,15 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self.json_response(completion_payload(messages, result.resolve(), model, max_tokens=max_tokens))
             return
+        if path == "/api/ingest":
+            # 投稿口单独鉴权：负责爬取的同学只需要往里送文章，不需要能改项目、
+            # 也不需要能导出整个库。给一把只开这道门的钥匙，万一泄漏或被写进
+            # 别人的脚本里，损失止于"多了一些待核验的文章"。
+            self.require_ingest_auth()
+            self.ingest(self.read_json())
+            return
         self.require_admin_auth()
         payload = self.read_json()
-        if path == "/api/ingest":
-            self.ingest(payload)
-            return
         if path == "/api/recommend":
             profile = payload.get("profile", payload)
             projects = DB.list_projects(include_expired=True)
@@ -467,37 +483,20 @@ class Handler(BaseHTTPRequestHandler):
                 "truthfulness_note": "系统未将验证码页或链接元数据当作文章全文。",
             }, 202)
             return
-        article_id = DB.insert_article({**payload, "collector_status": "success"})
-        decision = candidate_decision({"title": str(payload.get("title") or ""), "content": raw_text})
-        if not decision["candidate"]:
-            removed = 0
-            if decision["hard_excluded"]:
-                removed = DB.delete_projects_by_source(source_url, note="手动导入识别为非招募内容")
-            DB.log("lead", "已保存非招募来源审计，未进入机会库", {"article_id": article_id, "reasons": decision["reasons"], "removed": removed})
-            self.json_response({
-                "status": "not_opportunity", "article_id": article_id,
-                "action_required": "内容已保存为来源审计，但无明确招募/报名行动信号，不会进入机会库。",
-                "truthfulness_note": "行前预告、实践纪实和活动回顾不能作为可报名机会推荐。",
-                "decision_reasons": decision["reasons"],
-            }, 202)
-            return
-        project = extract_project(raw_text, {**payload, "input_type": input_type})
-        project["article_id"] = article_id
-        duplicate = DB.find_duplicate(project)
-        merged = False
-        if duplicate:
-            project["id"] = duplicate["id"]
-            project["created_at"] = duplicate.get("created_at", project["created_at"])
-            project["risk_notes"] = list(dict.fromkeys(duplicate.get("risk_notes", []) + project.get("risk_notes", [])))
-            merged = True
-        project = DB.upsert_project(project, note="从新文章导入并合并" if merged else "首次导入")
-        self.json_response({
-            "status": "imported",
-            "article_id": article_id,
-            "project": project,
-            "merged_duplicate": merged,
-            "review_required": project["status"] == "needs_review",
-        }, 201)
+        # 走和链接导入、采集文件导入完全相同的管线。这里原本另写了一份，
+        # 而那一份的合并只处理了 risk_notes——同一篇文章第二次投进来时，
+        # 稀疏版本会把已有字段整体覆盖掉。同样的逻辑散在三处，迟早分叉。
+        result = import_article_text(
+            DB, {**payload, "input_type": input_type}, raw_text,
+            collector_status="success",
+            log_channel="lead",
+            origin_label="手动导入",
+            # correction=true 表示"这次是订正，以我为准"。默认的合并是补充，
+            # 会挡下信息量下降的版本——而订正（延期、资格放宽、之前抽错了）
+            # 恰恰常常更少，不给这个开关的话订正会悄悄失效。
+            correction=bool(payload.get("correction")),
+        )
+        self.json_response(result, 201 if result["status"] == "imported" else 202)
 
     def handle_patch(self) -> None:
         path = urlparse(self.path).path

@@ -1,10 +1,27 @@
 #!/usr/bin/env python3
-"""Push collected article text to the Xiaoda ingestion endpoint.
+"""爬到一篇就推一篇——给负责采集的同学直接抄进爬虫里。
 
-Usage:
+命令行自测：
+
     export XIAODA_INGEST_URL=http://8.217.145.109:8000/api/ingest
-    export XIAODA_INGEST_KEY=<submission key>
-    python3 scripts/push_article.py articles.jsonl
+    export XIAODA_INGEST_KEY=<给你的投稿密钥>
+    python3 scripts/push_article.py 样例.jsonl
+
+写进自己的爬虫里（把这个文件放到爬虫目录，或直接复制 push_article 函数）：
+
+    from push_article import push_article
+    push_article({
+        "source_account": "清华大学学生社会实践",
+        "source_url": "https://mp.weixin.qq.com/s/xxx",
+        "title": "……",
+        "publish_date": "2026-08-05",
+        "raw_text": "正文全文……",
+    })
+
+只用标准库，不装任何包。失败会抛异常并带上服务端的说明，不会静默吞掉。
+
+投稿密钥只能往里送文章，不能改项目、不能导出项目库——万一写进了公开仓库
+或者聊天记录，损失止于"多了一些待核验的文章"。即便如此也别往公开处贴。
 """
 from __future__ import annotations
 
@@ -22,12 +39,27 @@ RETRYABLE = {429, 500, 502, 503, 504}
 
 
 class PushFailed(RuntimeError):
-    """The server rejected a submission or all retries failed."""
+    """服务端明确拒绝，或重试若干次仍未成功。"""
 
 
 def push_article(article: dict, *, correction: bool = False, url: str = "",
                  key: str = "", retries: int = 3, timeout: int = 30) -> dict:
-    """Push one article and return the decoded server response."""
+    """推送一篇文章，返回服务端的结果。
+
+    返回里的 status 有三种：
+      imported        —— 已生成项目卡
+      not_opportunity —— 存了原文，但判定不是招募（纪实/回顾/行前预告）
+      needs_text      —— 只收到链接没有正文，存成了待补线索
+    后两种都不是错误，不用重试，也不用改内容再发一遍。
+
+    correction=True 用于订正一篇已经推过的文章：主办方改了通知（延期、名额
+    调整、资格放宽），或者你发现之前那版正文抓漏了。
+
+    平时重复推送同一条是安全的——按 source_url 认成同一个项目，只补不覆盖，
+    不会重复出现在推荐里。但正因为"只补不覆盖"，订正后的内容如果比原来少
+    （比如资格从"仅限计算机系"改成"面向全校"），默认会被挡回去。这时候要
+    带上 correction=True，表示以这一版为准。
+    """
     url = url or os.getenv("XIAODA_INGEST_URL") or DEFAULT_URL
     key = key or os.getenv("XIAODA_INGEST_KEY", "")
     if not key:
@@ -40,6 +72,7 @@ def push_article(article: dict, *, correction: bool = False, url: str = "",
     if correction:
         request_body["correction"] = True
     body = json.dumps(request_body, ensure_ascii=False).encode("utf-8")
+    # 不走系统代理。本机代理常把内网/裸 IP 一起劫走，表现成莫名其妙的 502。
     opener = build_opener(ProxyHandler({}))
 
     last = ""
@@ -54,12 +87,13 @@ def push_article(article: dict, *, correction: bool = False, url: str = "",
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:200]
             if exc.code not in RETRYABLE:
+                # 401 密钥不对、422 内容不合规——重试多少次都一样，直接报出来。
                 raise PushFailed(f"HTTP {exc.code}：{detail}") from exc
             last = f"HTTP {exc.code}：{detail}"
         except URLError as exc:
             last = f"连不上：{exc.reason}"
         if attempt < retries:
-            time.sleep(2 ** attempt)
+            time.sleep(2 ** attempt)  # 1 次失败后等 2s、4s，别把服务打死
     raise PushFailed(f"重试 {retries} 次仍未成功。{last}")
 
 
@@ -78,6 +112,7 @@ def main() -> int:
             continue
         try:
             record = json.loads(line)
+            # 文件里也可以写 "correction": true，逐条标记哪些是订正。
             result = push_article(record, correction=bool(record.pop("correction", False)))
         except (PushFailed, json.JSONDecodeError) as exc:
             failed += 1
@@ -89,7 +124,7 @@ def main() -> int:
             status = "corrected"
         title = (result.get("project") or {}).get("title", "")
         print(f"  第 {number} 行  {status:<16} {title[:30]}")
-        time.sleep(0.3)
+        time.sleep(0.3)  # 别把服务刷满，评审期间它同时在给用户服务
 
     print(f"\n成功 {ok} 条，失败 {failed} 条")
     return 0 if failed == 0 else 1

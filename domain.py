@@ -128,6 +128,33 @@ def _find_line(lines: list[str], keywords: Iterable[str]) -> str:
     return ""
 
 
+# 中文句末标点。用于把挤成一整行的正文切回一句一句。
+_SENTENCE_END = re.compile(r"(?<=[。；！？!?])")
+
+
+def _clip_to_keyword_sentence(line: str, keywords: Iterable[str], *, limit: int) -> str:
+    """从一整行里取出含关键词的那一句，并剥掉「标签：」前缀；太长则判为抽取失败。
+
+    公众号正文被转发或被采集器压平之后经常丢掉换行，整段挤成一行。原来的做法
+    是「砍掉第一个冒号之前的部分，剩下全要」，在这种输入上会把后面几句话一起
+    吞进来——实测抽出过一个 60 字的「实践地点」，里面还夹着报名截止日期和一句
+    欢迎报名。
+
+    这种结果比抽不到更糟：抽不到会被标进 uncertain_fields 交给人工核验，而一个
+    看起来有值的字段会被当成已确认，直接进入推荐和文案。所以这里宁可判失败——
+    一个 60 字的「地点」显然不是地点。
+    """
+    if not line:
+        return ""
+    for sentence in _SENTENCE_END.split(line):
+        if any(keyword in sentence for keyword in keywords):
+            value = re.sub(r"^.*?[：:]", "", sentence).strip().strip("。；！？!?,，")
+            return value if 0 < len(value) <= limit else ""
+    # 关键词不在任何一句里（通常是整行没有句末标点），退回原有做法再判长度。
+    value = re.sub(r"^.*?[：:]", "", line).strip()
+    return value if 0 < len(value) <= limit else ""
+
+
 def _find_section(lines: list[str], headings: Iterable[str], *, max_lines: int = 12) -> str:
     """Return a labeled text block when schedule/requirements follow a heading."""
     for index, line in enumerate(lines):
@@ -215,8 +242,15 @@ def _extract_themes(text: str) -> list[str]:
     return tags[:5] or ["综合实践"]
 
 
+LOCATION_KEYWORDS = ["实践地点", "活动地点", "项目地点", "调研地点", "地点："]
+# 地点写到"云南省大理白族自治州祥云县某某镇"已经很长了；超过这个长度基本是抽串行了。
+MAX_LOCATION_DETAIL = 40
+# 资格说明可以长一些（会列院系、年级、专业），但一整段正文肯定不是资格说明。
+MAX_ELIGIBILITY_TEXT = 90
+
+
 def _extract_location(lines: list[str], text: str) -> tuple[dict[str, str], str]:
-    location_line = _find_line(lines, ["实践地点", "活动地点", "项目地点", "调研地点", "地点："])
+    location_line = _find_line(lines, LOCATION_KEYWORDS)
     haystack = location_line or text[:1000]
     place = next((item for item in KNOWN_LOCATIONS if item in haystack), "")
     if "线上" in haystack and any(word in haystack for word in ["线下", "实地"]):
@@ -227,19 +261,43 @@ def _extract_location(lines: list[str], text: str) -> tuple[dict[str, str], str]
         mode = "offline"
     else:
         mode = "unknown"
+    # 没有地点行时 detail 留空，不要拿正文里认出的省名（place）顶上。
+    # 省名已经存在 province 字段里，塞进 detail 不增加任何信息，却会在合并时
+    # 变成一个"非空的弱值"，把上一版抽到的"云南省大理州"顶掉——实测踩过。
+    detail = _clip_to_keyword_sentence(location_line, LOCATION_KEYWORDS, limit=MAX_LOCATION_DETAIL)
     return {
         "country": "中国",
         "province": place if place not in {"线上", ""} else "",
         "city": "",
-        "detail": re.sub(r"^.*?[：:]", "", location_line).strip()[:120] if location_line else "",
+        "detail": detail,
         "mode": mode,
     }, location_line
 
 
+# 明确的资格标签。这些词出现基本就意味着"这一行讲的是谁能报"。
+ELIGIBILITY_LABELS = [
+    "招募对象", "面向对象", "报名对象", "参与对象", "参加对象", "招收对象", "面向人群",
+    "参与资格", "报名资格", "申请资格", "申请条件", "参与条件", "选拔条件",
+    "招募要求", "报名要求", "报名条件", "招募范围",
+]
+# 宽松线索。只在没有明确标签时才用——招募通知的第一句几乎都是
+# "……现面向全校招募……"这种套话，拿它当资格说明会把整句开场白写进项目卡。
+ELIGIBILITY_LOOSE = ["面向全校", "全校学生", "全校师生", "仅限", "限本科", "限研究生"]
+ELIGIBILITY_KEYWORDS = ELIGIBILITY_LABELS + ELIGIBILITY_LOOSE
+_ELIGIBILITY_HEADING_ONLY = {"报名要求", "招募要求", "申请条件", "报名条件", "参与资格", "招募对象", "报名对象"}
+
+
 def _extract_eligibility(lines: list[str]) -> tuple[dict[str, Any], str]:
-    line = _find_line(lines, ["招募对象", "面向对象", "报名对象", "参与对象", "申请条件", "招募要求", "报名要求", "报名条件", "面向全校"])
-    if line in {"报名要求", "招募要求", "申请条件", "报名条件"}:
+    # 分两轮找：先找带明确标签的行，找不到再退回宽松线索。
+    # 不能一轮找完——_find_line 返回的是第一个命中行，而开场白往往排在
+    # 真正的「参与资格：」那一行前面，一轮下来永远是套话赢。
+    line = _find_line(lines, ELIGIBILITY_LABELS) or _find_line(lines, ELIGIBILITY_LOOSE)
+    if line in _ELIGIBILITY_HEADING_ONLY:
         line = _find_section(lines, [line])
+    elif len(line) > MAX_ELIGIBILITY_TEXT:
+        # 正文被压平成一整行时，这里会捞到整段。切回含关键词的那一句；
+        # 切不出合理长度就当没抽到，交给人工核验，而不是把整段当成资格说明。
+        line = _clip_to_keyword_sentence(line, ELIGIBILITY_KEYWORDS, limit=MAX_ELIGIBILITY_TEXT)
     explicit_no_restriction = any(term in line for term in ["面向全校", "全校学生", "全校师生"])
     departments = [dep for dep in KNOWN_DEPARTMENTS if dep in line]
     grades = [term for term in GRADE_TERMS if term in line]
@@ -1049,6 +1107,93 @@ def deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
         else:
             result[key] = value
     return result
+
+
+PLACEHOLDER_LOCATIONS = {"", "活动地点", "实践地点", "项目地点"}
+_CARRY_FORWARD_FIELDS = ("practice_start", "practice_end", "signup_deadline", "signup_method", "organizer", "contact")
+
+
+def _eligibility_richness(project: dict[str, Any]) -> int:
+    """这一版的参与资格里，抽出了多少条真正能用来筛人的条件。
+
+    「面向全校」也算一条——它是明确的"不限"，而不是没抽到。真正的零分是
+    那种抽了一段话、但里面没有任何院系/年级/身份/不限信号的情况。
+    """
+    eligibility = project.get("eligibility") or {}
+    score = (len(eligibility.get("departments", []))
+             + len(eligibility.get("grades", []))
+             + len(eligibility.get("identities", [])))
+    if eligibility.get("explicit_no_restriction"):
+        score += 1
+    return score
+
+
+def merge_project_versions(duplicate: dict[str, Any], project: dict[str, Any]) -> dict[str, Any]:
+    """同一个项目再次被导入时，合并新旧两版，就地修改并返回 project。
+
+    再次导入是**补充**，不是覆盖，也不是跳过。
+
+    这条规则来自一个具体的坑：同一篇招募推送常被多个号转发，转发版往往是
+    截断的；采集器重跑时也可能因为风控只拿到半截正文。如果一律"后来者覆盖"，
+    一条本来字段齐全的项目会被一条只有标题和截止日期的稀疏版本清空——而且
+    清空之后看不出发生过什么，只会显示成"这个项目信息不全"。
+
+    所以：新版本有值就用新版本，新版本为空而旧版本有值就留旧的。地点还要额外
+    防一手，"活动地点"这种抽取失败的占位串不能覆盖掉"云南省大理州"。
+    人工核验过的 OCR 结论（image_ocr_review）也不能被自动抽取覆盖。
+    """
+    project["id"] = duplicate["id"]
+    project["created_at"] = duplicate.get("created_at", project.get("created_at"))
+
+    for field in _CARRY_FORWARD_FIELDS:
+        if not project.get(field) and duplicate.get(field):
+            project[field] = duplicate[field]
+
+    if _eligibility_richness(project) < _eligibility_richness(duplicate):
+        # 不只看"是不是空的"。招募通知的开场白里几乎都有「现面向全校招募…」，
+        # 排版丢失时会被当成资格说明抽出来——非空，但只是一句套话。若拿它去
+        # 覆盖上一版真正那行「参与资格：仅限计算机系大二至大四本科生」，硬过滤
+        # 就会放行本来没资格的人。所以比的是抽出了多少可用的结构化条件。
+        project["eligibility"] = duplicate["eligibility"]
+
+    new_detail = str((project.get("location") or {}).get("detail") or "").strip()
+    old_detail = str((duplicate.get("location") or {}).get("detail") or "").strip()
+    if new_detail in PLACEHOLDER_LOCATIONS and old_detail not in PLACEHOLDER_LOCATIONS:
+        project["location"] = duplicate["location"]
+
+    if (project.get("reimbursement", {}).get("has_reimbursement") is None
+            and duplicate.get("reimbursement", {}).get("has_reimbursement") is not None):
+        project["reimbursement"] = duplicate["reimbursement"]
+
+    if len(project.get("schedule_segments", [])) < len(duplicate.get("schedule_segments", [])):
+        project["schedule_segments"] = duplicate["schedule_segments"]
+
+    project["image_sources"] = list(dict.fromkeys(duplicate.get("image_sources", []) + project.get("image_sources", [])))
+    if duplicate.get("image_ocr_status") == "completed" and project.get("image_ocr_status") != "completed":
+        project["image_ocr_status"] = "completed"
+
+    project["field_evidence"] = deep_merge(duplicate.get("field_evidence", {}), project.get("field_evidence", {}))
+    for field, old_evidence in duplicate.get("field_evidence", {}).items():
+        if (old_evidence.get("extraction_method") == "image_ocr_review"
+                and project["field_evidence"].get(field, {}).get("extraction_method") != "image_ocr_review"):
+            project["field_evidence"][field] = old_evidence
+
+    project["risk_notes"] = list(dict.fromkeys(duplicate.get("risk_notes", []) + project.get("risk_notes", [])))
+
+    # 两版的存疑字段先合并，再把这一版真的补上了的划掉。
+    uncertain = set(duplicate.get("uncertain_fields", [])) | set(project.get("uncertain_fields", []))
+    if project.get("practice_start") and project.get("practice_end"):
+        uncertain.discard("practice_dates")
+    if project.get("signup_deadline"):
+        uncertain.discard("signup_deadline")
+    if project.get("eligibility", {}).get("restriction_text"):
+        uncertain.discard("eligibility")
+    if project.get("reimbursement", {}).get("has_reimbursement") is not None:
+        uncertain.discard("reimbursement")
+    if project.get("signup_method"):
+        uncertain.discard("signup_method")
+    project["uncertain_fields"] = sorted(uncertain)
+    return project
 
 
 def json_dumps(value: Any) -> str:

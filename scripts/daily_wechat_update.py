@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from database import Database  # noqa: E402
-from domain import deep_merge, extract_project  # noqa: E402
+from domain import extract_project, merge_project_versions  # noqa: E402
 from opportunity_filter import candidate_decision  # noqa: E402
 from wechat_ingest import collector_credentials_present  # noqa: E402
 from wechat_image_ocr import OCRResult, ocr_wechat_images  # noqa: E402
@@ -100,51 +100,10 @@ def import_article(database: Database, article: dict[str, Any], *, ocr: OCRResul
     duplicate = database.find_duplicate(project)
     merged = False
     if duplicate:
-        # Re-scan is intentionally enrichment, not a skip.  Preserve manually
-        # reviewed fields when the new scrape is poorer, but always take richer
-        # OCR text/image state and retry incomplete image OCR on future scans.
-        project["id"] = duplicate["id"]
-        project["created_at"] = duplicate.get("created_at", project["created_at"])
-        for field in ("practice_start", "practice_end", "signup_deadline", "signup_method", "organizer", "contact"):
-            if not project.get(field) and duplicate.get(field):
-                project[field] = duplicate[field]
-        # A newly fetched body can be poorer than an earlier OCR/manual review.
-        # Never replace a specific eligibility, location, or funding statement
-        # with an empty or placeholder extraction such as “活动地点”.
-        if not project.get("eligibility", {}).get("restriction_text") and duplicate.get("eligibility", {}).get("restriction_text"):
-            project["eligibility"] = duplicate["eligibility"]
-        new_location = project.get("location", {})
-        old_location = duplicate.get("location", {})
-        placeholder_locations = {"", "活动地点", "实践地点", "项目地点"}
-        if str(new_location.get("detail") or "").strip() in placeholder_locations and str(old_location.get("detail") or "").strip() not in placeholder_locations:
-            project["location"] = old_location
-        new_reimbursement = project.get("reimbursement", {})
-        old_reimbursement = duplicate.get("reimbursement", {})
-        if new_reimbursement.get("has_reimbursement") is None and old_reimbursement.get("has_reimbursement") is not None:
-            project["reimbursement"] = old_reimbursement
-        if len(project.get("schedule_segments", [])) < len(duplicate.get("schedule_segments", [])):
-            project["schedule_segments"] = duplicate["schedule_segments"]
-        project["image_sources"] = list(dict.fromkeys(duplicate.get("image_sources", []) + project.get("image_sources", [])))
-        old_status = duplicate.get("image_ocr_status", "")
-        new_status = project.get("image_ocr_status", "")
-        if old_status == "completed" and new_status != "completed":
-            project["image_ocr_status"] = "completed"
-        project["field_evidence"] = deep_merge(duplicate.get("field_evidence", {}), project.get("field_evidence", {}))
-        for field, old_evidence in duplicate.get("field_evidence", {}).items():
-            new_evidence = project["field_evidence"].get(field, {})
-            if old_evidence.get("extraction_method") == "image_ocr_review" and new_evidence.get("extraction_method") != "image_ocr_review":
-                project["field_evidence"][field] = old_evidence
-        project["risk_notes"] = list(dict.fromkeys(duplicate.get("risk_notes", []) + project.get("risk_notes", [])))
-        uncertain = set(duplicate.get("uncertain_fields", [])) | set(project.get("uncertain_fields", []))
-        if project.get("practice_start") and project.get("practice_end"):
-            uncertain.discard("practice_dates")
-        if project.get("signup_deadline"):
-            uncertain.discard("signup_deadline")
-        if project.get("eligibility", {}).get("restriction_text"):
-            uncertain.discard("eligibility")
-        if project.get("reimbursement", {}).get("has_reimbursement") is not None:
-            uncertain.discard("reimbursement")
-        project["uncertain_fields"] = sorted(uncertain)
+        # 重扫是补充，不是跳过、也不是覆盖：新抓到的正文可能比上一次的
+        # OCR 结果或人工核验更差。合并规则见 domain.merge_project_versions，
+        # 链接导入和采集文件导入走的是同一份实现。
+        project = merge_project_versions(duplicate, project)
         merged = True
     database.upsert_project(project, note="每日公众号采集更新" if merged else "每日公众号采集导入")
     return "merged" if merged else "imported"

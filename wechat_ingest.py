@@ -22,7 +22,7 @@ from urllib.parse import urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from database import Database
-from domain import extract_project
+from domain import extract_project, merge_project_versions
 from opportunity_filter import candidate_decision
 
 
@@ -267,13 +267,56 @@ def import_wechat_link(
         "title": str(payload.get("title") or result.title).strip(),
         "publish_date": result.publish_date,
     }
-    article_id = database.insert_article({**metadata, "raw_text": result.raw_text, "collector_status": result.method})
-    decision = candidate_decision({"title": metadata["title"], "content": result.raw_text})
+    return import_article_text(
+        database,
+        metadata,
+        result.raw_text,
+        collector_status=result.method,
+        log_channel="wechat_link",
+        origin_label="公众号链接自动抓取",
+        correction=bool(payload.get("correction")),
+    )
+
+
+def import_article_text(
+    database: Database,
+    metadata: dict[str, Any],
+    raw_text: str,
+    *,
+    collector_status: str = "supplied_text",
+    log_channel: str = "ingest",
+    origin_label: str = "外部导入",
+    correction: bool = False,
+) -> dict[str, Any]:
+    """把一篇已经拿到正文的文章走完入库管线。
+
+    抓取方式（现场抓链接、外部采集器交付的文件、人工粘贴）不同，但拿到正文
+    之后要做的判断完全一样：存原文留证 → 判断是不是招募 → 保守抽取项目卡 →
+    查重 → 入库待核验。
+
+    这段逻辑必须只有一份。如果每条导入路径各写一遍，最先分叉的一定是
+    「什么算招募内容」和「查重怎么算」这两处——而它们分叉之后，两条路
+    导进来的项目会带着不同的判断标准躺在同一张表里，等发现时已经分不清
+    哪条是哪条了。
+
+    correction=True 表示"这次是订正，以我为准"。
+
+    默认的合并是**补充**：新版本某个字段为空就沿用旧值，资格说明信息量下降
+    也会被挡回去。这对"同一篇文章的不同完整度版本"是对的——转发版、被风控
+    截断的版本，都不该把完整版洗掉。
+
+    但数据维护方发现之前抽错了、或者主办方改了通知（延期、名额调整、资格
+    放宽），订正后的内容常常比原来"更少"：把"仅限计算机系"改成"面向全校"，
+    按补充规则会被判成信息量下降而拒绝。那样订正就悄悄失效了——最糟的一类
+    bug，因为看起来一切正常。所以给一个显式开关，而不是让规则去猜。
+    """
+    article_id = database.insert_article({**metadata, "raw_text": raw_text, "collector_status": collector_status})
+    decision = candidate_decision({"title": metadata.get("title", ""), "content": raw_text})
     if not decision["candidate"]:
         removed = 0
         if decision["hard_excluded"]:
-            removed = database.delete_projects_by_source(metadata["source_url"], note="链接导入识别为非招募内容")
-        database.log("wechat_link", "公众号链接已审计但未进入机会库", {"article_id": article_id, "reasons": decision["reasons"], "removed": removed})
+            removed = database.delete_projects_by_source(metadata.get("source_url", ""), note=f"{origin_label}识别为非招募内容")
+        database.log(log_channel, "正文已审计但未进入机会库", {"article_id": article_id, "reasons": decision["reasons"], "removed": removed})
         return {
             "status": "not_opportunity",
             "article_id": article_id,
@@ -281,22 +324,34 @@ def import_wechat_link(
             "truthfulness_note": "行前预告、实践纪实、活动回顾等内容不会作为可报名机会推荐。",
             "decision_reasons": decision["reasons"],
         }
-    project = extract_project(result.raw_text, metadata)
+    project = extract_project(raw_text, metadata)
     project["article_id"] = article_id
     duplicate = database.find_duplicate(project)
     merged = False
-    if duplicate:
+    if duplicate and correction:
+        # 订正：整条以新版本为准，只保留身份和创建时间，让它仍是同一条项目
+        # 而不是新开一条。历史不会丢——每一次导入的原文都在 articles 表里，
+        # upsert_project 也会留版本记录，改错了能翻回去。
         project["id"] = duplicate["id"]
-        project["created_at"] = duplicate.get("created_at", project["created_at"])
-        project["risk_notes"] = list(dict.fromkeys(duplicate.get("risk_notes", []) + project.get("risk_notes", [])))
+        project["created_at"] = duplicate.get("created_at", project.get("created_at"))
         merged = True
-    project = database.upsert_project(project, note="公众号链接自动抓取并导入" if not merged else "公众号链接自动抓取后合并")
-    database.log("wechat_link", "已从公众号链接导入项目", {"article_id": article_id, "project_id": project["id"], "method": result.method})
+    elif duplicate:
+        # 再次导入是补充而不是覆盖：转发版和风控截断版都可能比已有的更稀疏。
+        project = merge_project_versions(duplicate, project)
+        merged = True
+    if merged:
+        note = f"{origin_label}订正覆盖" if correction else f"{origin_label}后合并"
+    else:
+        note = f"{origin_label}并导入"
+    project = database.upsert_project(project, note=note)
+    database.log(log_channel, "已订正项目" if correction and merged else "已导入项目",
+                 {"article_id": article_id, "project_id": project["id"], "method": collector_status})
     return {
         "status": "imported",
         "article_id": article_id,
+        "corrected": bool(correction and merged),
         "project": project,
         "merged_duplicate": merged,
         "review_required": project["status"] == "needs_review",
-        "collector_method": result.method,
+        "collector_method": collector_status,
     }
