@@ -327,6 +327,15 @@ WRITING_HELP_WORDS = (
     "调研提纲", "写提纲", "写框架", "写一份", "写一个",
 )
 
+# 问"这类东西一般怎么写"，要的是方法不是成稿。这些词必须参与路由判断，
+# 光放在处理函数里不够——「招募推送文案有什么套路」会先被"推送"抢去写成稿。
+GENERIC_WRITING_HINTS = (
+    "一般怎么写", "怎么写", "如何写", "写作技巧", "有什么套路", "套路是什么",
+    "格式是什么", "结构是什么", "要写哪些", "包含哪些", "分几部分",
+    "范文", "模板", "示例", "有没有例子", "怎么下笔", "开头怎么", "结尾怎么",
+    "注意什么", "注意哪些", "有什么讲究",
+)
+
 # 关于社会实践本身的常识性提问，不是在找项目。
 ABOUT_PRACTICE_WORDS = (
     "保研", "加分", "有什么用", "有用吗", "值得吗", "算学分", "综测",
@@ -407,6 +416,21 @@ class PracticeChatAdapter:
 
     def _reset_project_cache(self) -> None:
         self._local.projects = {}
+        self._local.corpus = None
+
+    def _corpus(self):
+        """写作范例语料库。按进程缓存——建一次要读全部原文并算一遍 IDF。
+
+        语料是采集来的真实推文，包括那些不是可报名机会的实践总结、纪实和
+        基地推介：作为机会它们是噪音，作为范文正好——真实、清华语境、已经
+        发出去过，比任何模板都贴近实际写法。
+        """
+        corpus = getattr(self, "_corpus_cache", None)
+        if corpus is None:
+            from corpus import load_corpus
+            corpus = load_corpus(self.db)
+            self._corpus_cache = corpus
+        return corpus
 
     def reply(self, messages: list[dict[str, Any]]) -> ChatResult:
         # 每次对话开始时清空缓存：同一次请求内复用，跨请求不复用，
@@ -428,8 +452,11 @@ class PracticeChatAdapter:
         # 注意这里要用"精确点名"而不是模糊匹配：说「帮我写一个乡村教育的调研提纲」时，
         # 「乡村教育」会模糊命中「滇西乡村教育数字化调研」，于是被当成给那个项目写材料。
         # 只有用户完整说出项目名或 ID，才认为这次写作请求是绑定到项目的。
-        if any(word in latest for word in WRITING_HELP_WORDS) and not self._mentions_project_exactly(latest):
-            return ChatResult(self._writing_help(latest), "writing_help")
+        # 「招募推送一般怎么写」问的是写法，不是要给某个项目出成稿。这类必须在
+        # POST_WORDS / GENERATE_WORDS 之前拦下——否则"推送""帮我写"会先把它抢走。
+        if any(word in latest for word in WRITING_HELP_WORDS + GENERIC_WRITING_HINTS) \
+                and not self._mentions_project_exactly(latest):
+            return self._writing_help(latest)
         if any(word in latest for word in NEGATION_WORDS):
             return self._handle_correction(messages, all_user_text, latest)
         if any(word in latest for word in DECISION_WORDS):
@@ -1021,12 +1048,24 @@ class PracticeChatAdapter:
             "先说说你的院系、年级和大概什么时候有空？"
         )
 
-    def _writing_help(self, latest: str) -> str:
-        """写作/润色请求，但没绑定到具体项目。
+    def _writing_help(self, latest: str) -> ChatResult:
+        """写作类请求，但没有绑定具体项目。
 
-        以前这类会被"实践""帮我写"带偏，返回一页项目推荐或某个项目的报名表建议。
+        分两种，以前混作一谈、一律要求先选项目：
+
+        1. **通用写法问题**——「实践总结报告一般怎么写」「招募推送有什么套路」。
+           用户要的是方法，不是他那个项目的材料。硬要他先选项目，等于答非所问。
+           这种用语料库里的真实推文当范例来答。
+
+        2. **要给自己项目写材料**——「帮我写报名理由」。这种确实得先知道是哪个
+           项目，因为时间、地点、资格、报名方式都必须跟已核验的项目卡对上。
+
+        两者的边界必须说清楚：范例只提供写法，其中的日期地点联系方式属于别的
+        项目，写进用户的材料就是编造。
         """
-        return (
+        if any(hint in latest for hint in GENERIC_WRITING_HINTS):
+            return ChatResult(self._generic_writing_answer(latest), "writing_guide")
+        return ChatResult(
             "你是想让我帮着写点东西——但我得先知道是给**哪个项目**写，"
             "因为材料里的时间、地点、资格、报名方式都要跟已核验的项目卡对上，我不能凭空编。\n\n"
             "**说出项目名**（标题里能区分的几个字就行），然后告诉我要哪一种：\n"
@@ -1035,7 +1074,72 @@ class PracticeChatAdapter:
             "- 访谈提纲：围绕已选点位的问题清单\n"
             "- 调研报告框架：章节结构与要点\n"
             "- 公众号推送文案：可直接改的成稿\n\n"
-            "如果你还没定项目，先说「推荐」加上你的时间和方向，我先帮你筛。"
+            "如果你只是想问**这类材料一般怎么写**，直接问就行，比如"
+            "「实践总结报告一般怎么写」——那种不用先定项目。",
+            "writing_help",
+        )
+
+    _GENRE_FOR_QUESTION = (
+        (("招募", "纳新", "招新", "报名推送"), "招募推送"),
+        (("总结", "纪实", "回顾", "心得", "感悟"), "实践总结"),
+        (("基地", "推介"), "基地/资源介绍"),
+        (("通讯", "简讯", "报道"), "活动通讯"),
+    )
+
+    def _generic_writing_answer(self, question: str) -> str:
+        """回答"这类东西一般怎么写"，用语料库里的真实推文当范例。"""
+        genre = next((name for words, name in self._GENRE_FOR_QUESTION
+                      if any(word in question for word in words)), "")
+        corpus = self._corpus()
+        samples = corpus.search(question, genre=genre, limit=3) or corpus.search(question, limit=3)
+
+        if not samples:
+            return (
+                "我这边的语料库里还没有同类的真实推文可以参考——目前收录的都是"
+                f"{'、'.join(corpus.genres()) or '（暂无）'}这几类。\n\n"
+                "你可以把想模仿的那篇推文正文贴给我，我照着它的结构和语气来写；"
+                "或者说出一个具体项目名，我按项目卡里的已核验信息给你出材料。"
+            )
+
+        from corpus import build_reference_block
+        reference = build_reference_block(samples)
+        listing = "\n".join(
+            f"- {s.title}（{s.account or '来源未标注'}·{s.genre}）" for s in samples)
+
+        if llm.is_enabled():
+            system_prompt = (
+                "你是清华大学社会实践与志愿服务的写作指导。用户问的是"
+                "「这类材料一般怎么写」，要的是方法和结构，不是某个具体项目的成稿。\n\n"
+                "请给出：写之前要想清楚的问题、推荐的结构（分段列出每段写什么）、"
+                "这类文体的语气特点、常见的问题。\n\n"
+                "**硬性要求**：参考推文只用来学写法。绝不要引用其中的具体日期、"
+                "地点、人名、联系方式、报销金额、名额——那些是别的项目的事实。"
+                "需要举例时用「某地」「X月X日」这样的占位写法。\n"
+                "用中文，控制在 700 字以内，不要写成论文。"
+            )
+            try:
+                body = llm.complete(system_prompt, f"用户的问题：{question}\n\n{reference}")
+                if body.strip():
+                    return (
+                        f"{body.strip()}\n\n---\n\n"
+                        f"上面的写法建议参考了这几篇真实推文：\n{listing}\n\n"
+                        "里面的日期、地点、联系方式都属于这些项目本身，别直接搬。"
+                        "要写你自己项目的成稿，说出项目名就行——那时我会用项目卡里已核验的信息。"
+                    )
+            except llm.LLMUnavailable:
+                pass
+
+        # 没有写作模型时不硬编内容，给结构和范例，让人自己看。
+        return (
+            f"从库里找到 {len(samples)} 篇同类真实推文可以参考：\n\n{listing}\n\n"
+            "**通用结构**（这几篇的共同骨架）：\n"
+            "1. 开头点明背景和意义——为什么做这件事\n"
+            "2. 项目/活动本身：做什么、去哪、多长时间\n"
+            "3. 参与方式：谁能参加、怎么报名、截止什么时候\n"
+            "4. 保障与收获：经费、证明、能学到什么\n"
+            "5. 结尾的号召与联系方式\n\n"
+            "当前没有配置写作模型，我给不出成稿。要看某一篇的完整正文，"
+            "说出它标题里能区分的几个字即可。"
         )
 
     def _help_decide(self, messages: list[dict[str, Any]], all_user_text: str, latest: str) -> ChatResult:
