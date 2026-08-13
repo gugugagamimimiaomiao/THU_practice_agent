@@ -91,6 +91,56 @@ class ExtractionTests(unittest.TestCase):
         self.assertNotIn("practice_dates", project["uncertain_fields"])
 
 
+class PublishGateTests(unittest.TestCase):
+    """发布门槛与过期判定。取消人工核验后，这两条直接决定学生看到什么。"""
+
+    META = {"title": "支队招募", "source_url": "https://mp.weixin.qq.com/s/gate"}
+
+    def test_missing_optional_fields_still_publishes(self):
+        # 原来要求 5 个关键字段全齐，实测真实数据里 published 直接是 0——
+        # 而缺字段多半是原文没写，不是抽取失败，不该由学生承担。
+        project = extract_project("某某支队招募队员，欢迎报名。报名方式：详见原文。", self.META)
+        self.assertEqual(project["status"], "published")
+
+    def test_without_a_source_link_it_still_needs_review(self):
+        # 原文链接是最后的退路：其他字段都能写"未写明"，唯独没有出处时
+        # 学生无从核对，这种不能直接进正式推荐。
+        project = extract_project("某某支队招募队员，欢迎报名。", {"title": "支队招募"})
+        self.assertEqual(project["status"], "needs_review")
+        self.assertIn("source_url", project["uncertain_fields"])
+
+    def test_finished_practice_expires_even_without_a_deadline(self):
+        # 真实数据里 30 条属于这种：没写报名截止，但实践 7 月就做完了。
+        # 只看报名截止的话，它们会一直挂在推荐里。
+        notice = "支队招募\n实践时间：2026年7月2日至2026年7月9日\n报名方式：扫码"
+        project = extract_project(notice, self.META, today=date(2026, 8, 13))
+        self.assertEqual(project["status"], "expired")
+
+    def test_upcoming_practice_is_not_expired(self):
+        notice = "支队招募\n实践时间：2026年8月24日至2026年8月31日\n报名方式：扫码"
+        project = extract_project(notice, self.META, today=date(2026, 8, 13))
+        self.assertEqual(project["status"], "published")
+
+    def test_lead_in_line_is_not_mistaken_for_the_eligibility(self):
+        """「报名要求：我们希望你是：」本身不含条件，真正的条件在后面几行。
+
+        取消人工核验后这条会直接显示给学生，所以既不能拿引导语充数，
+        也不能顺手把下面的「报名方式」一起吞进资格说明里。
+        """
+        notice = "\n".join([
+            "2026年秋校团委志愿中心组长招募",
+            "报名要求",
+            "我们希望你是：",
+            "年级不限，有相关工作经验者优先",
+            "对志愿公益有热情",
+            "报名方式：发送简历至邮箱",
+        ])
+        text = extract_project(notice, self.META)["eligibility"]["restriction_text"]
+        self.assertIn("年级不限", text)
+        self.assertNotIn("我们希望你是", text)
+        self.assertNotIn("报名方式", text, "把下一个字段吞进资格说明里了")
+
+
 class FlattenedNoticeTests(unittest.TestCase):
     """正文被压平成一整行、或资格标签不在关键词表里时的抽取。
 

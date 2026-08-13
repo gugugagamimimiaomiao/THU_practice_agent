@@ -341,6 +341,53 @@ ELIGIBILITY_LABELS = [
 ELIGIBILITY_LOOSE = ["面向全校", "全校学生", "全校师生", "仅限", "限本科", "限研究生"]
 ELIGIBILITY_KEYWORDS = ELIGIBILITY_LABELS + ELIGIBILITY_LOOSE
 _ELIGIBILITY_HEADING_ONLY = {"报名要求", "招募要求", "申请条件", "报名条件", "参与资格", "招募对象", "报名对象"}
+# 「我们希望你是：」「如果你是：」这类引导语，冒号后面是空的，实质内容在下几行。
+_LEAD_IN_RE = re.compile(r"^[^。；！？]{0,24}(希望你|如果你|你需要|欢迎你|我们想找)[^。；！？]{0,8}[：:]\s*$")
+
+
+def _starts_new_field(line: str) -> bool:
+    """这一行是不是另一个字段的开头——整行是标签，或写成「标签：值」。
+
+    只判断整行等于标签是不够的：真实通知里绝大多数写成「报名方式：扫码报名」，
+    这种如果不认，往下取几行时会把别的字段一起吞进来。
+    """
+    bare = _NOTICE_ORDINAL.sub("", line).strip()
+    if bare.rstrip("：: ") in _NOTICE_FIELD_LABELS:
+        return True
+    head = re.split(r"[：:]", bare, maxsplit=1)[0].strip()
+    return bool(head) and head in _NOTICE_FIELD_LABELS
+
+
+def _lines_after(lines: list[str], heading: str, *, limit: int, max_lines: int = 3) -> str:
+    """引导行之后真正说条件的那几行，遇到下一个字段标签就停。
+
+    直接把整段拿走会连「报名方式：……」一起吞进资格说明里——这个字段是要
+    显示给学生看的，糊成一大块比缺失还难用。
+    """
+    try:
+        start = lines.index(heading) + 1
+    except ValueError:
+        return ""
+    picked: list[str] = []
+    for candidate in lines[start:start + max_lines]:
+        if _starts_new_field(candidate) or _is_lead_in(candidate):
+            break
+        picked.append(candidate.strip())
+        if sum(len(item) for item in picked) >= limit:
+            break
+    return "；".join(picked)[:limit]
+
+
+def _is_lead_in(line: str) -> bool:
+    """这一行是不是只起引导作用、本身不含条件。"""
+    stripped = line.strip()
+    if not stripped:
+        return False
+    if _LEAD_IN_RE.match(stripped):
+        return True
+    # 「报名要求：我们希望你是：」——剥掉标签之后仍然以冒号收尾，等于什么都没说。
+    tail = re.sub(r"^.*?[：:]", "", stripped).strip()
+    return bool(tail) and tail.endswith(("：", ":")) and len(tail) <= 12
 
 
 def _extract_eligibility(lines: list[str]) -> tuple[dict[str, Any], str]:
@@ -348,8 +395,10 @@ def _extract_eligibility(lines: list[str]) -> tuple[dict[str, Any], str]:
     # 不能一轮找完——_find_line 返回的是第一个命中行，而开场白往往排在
     # 真正的「参与资格：」那一行前面，一轮下来永远是套话赢。
     line = _find_line(lines, ELIGIBILITY_LABELS) or _find_line(lines, ELIGIBILITY_LOOSE)
-    if line in _ELIGIBILITY_HEADING_ONLY:
-        line = _find_section(lines, [line])
+    if line and (line in _ELIGIBILITY_HEADING_ONLY or _is_lead_in(line)):
+        # 「报名要求：我们希望你是：」这类引导行本身没有信息，真正的条件在后面
+        # 几行。真实数据里抽到过，还因为非空被当成已确认的资格说明显示出去。
+        line = _lines_after(lines, line, limit=MAX_ELIGIBILITY_TEXT)
     elif len(line) > MAX_ELIGIBILITY_TEXT:
         # 正文被压平成一整行时，这里会捞到整段。切回含关键词的那一句；
         # 切不出合理长度就当没抽到，交给人工核验，而不是把整段当成资格说明。
@@ -507,10 +556,23 @@ def extract_project(raw_text: str, metadata: dict[str, Any] | None = None, *, to
         "signup_deadline", "eligibility", "reimbursement", "signup_method", "source_url"
     ])
     confidence = round(min(0.98, 0.42 + critical_present * 0.09 + min(len(cleaned), 2500) / 25000), 2)
-    status = "needs_review" if any(field in uncertain_fields for field in [
-        "signup_deadline", "eligibility", "reimbursement", "signup_method", "source_url"
-    ]) else "published"
+    # 发布门槛：只要求能回查（有原文链接和标题）。
+    #
+    # 原来要求 5 个关键字段全齐才发布，实测在真实数据上等于全部卡住——协作方
+    # 推来的 28 条真实项目里 published 是 0，推荐里只剩演示数据。而卡住的原因
+    # 多半不是抽取失败，是原文本身就没写：24 篇真实招募里 9 篇根本没有报名截止，
+    # 志愿类常年滚动更是普遍不写。
+    #
+    # 所以改成：缺的字段照实说「原文未写明」，项目照常进推荐，但每条都带原文
+    # 链接，学生一点就能核。这比把项目全部藏起来诚实——藏起来等于假装没有这个
+    # 机会，而"我们没抽到这个字段"不该由学生承担。
+    status = "needs_review" if any(field in uncertain_fields for field in ["source_url"]) else "published"
     if deadline and parse_iso_date(deadline) and parse_iso_date(deadline) < today:
+        status = "expired"
+    # 报名截止常常没写，但实践时间写了。实践都结束了就不该再推荐——真实数据里
+    # 30 条属于这种：没有报名截止，但实践 7 月就做完了。
+    practice_over = parse_iso_date(practice_end)
+    if status != "expired" and practice_over and practice_over < today:
         status = "expired"
 
     evidence: dict[str, Any] = {}
@@ -563,9 +625,13 @@ def extract_project(raw_text: str, metadata: dict[str, Any] | None = None, *, to
 def refresh_status(project: dict[str, Any], *, today: date | None = None) -> dict[str, Any]:
     today = today or date.today()
     result = deepcopy(project)
-    deadline = parse_iso_date(result.get("signup_deadline"))
-    if result.get("status") not in {"rejected"} and deadline and deadline < today:
-        result["status"] = "expired"
+    if result.get("status") != "rejected":
+        deadline = parse_iso_date(result.get("signup_deadline"))
+        # 实践本身结束了同样算过期。很多通知不写报名截止只写实践时间，
+        # 只看截止日期的话，一个 7 月就做完的支队会一直挂在推荐里。
+        practice_over = parse_iso_date(result.get("practice_end"))
+        if (deadline and deadline < today) or (practice_over and practice_over < today):
+            result["status"] = "expired"
     result["updated_at"] = now_iso()
     return result
 
