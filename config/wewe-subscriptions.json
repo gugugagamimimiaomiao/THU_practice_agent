@@ -60,17 +60,63 @@
       "status": "subscribed",
       "verified_at": "2026-08-12",
       "activated_at": "2026-08-12"
+    },
+    {
+      "name": "清华大学小研在线",
+      "article_url": "https://mp.weixin.qq.com/s/XZF2gFKrvidcenvzuG9W4g",
+      "feed_id": "MP_WXS_3075477534",
+      "status": "subscribed",
+      "verified_at": "2026-08-13",
+      "activated_at": "2026-08-13"
+    },
+    {
+      "name": "建院宣传中心",
+      "article_url": "https://mp.weixin.qq.com/s/zfb3LB9gLsz0siczRtny7g",
+      "feed_id": "MP_WXS_3083074109",
+      "status": "subscribed",
+      "verified_at": "2026-08-13",
+      "activated_at": "2026-08-13"
+    },
+    {
+      "name": "水木华声",
+      "article_url": "https://mp.weixin.qq.com/s/qZ8x-RQ344D8xOZ29dP1ow",
+      "feed_id": "MP_WXS_3944665780",
+      "status": "queued_for_subscription",
+      "verified_at": "2026-08-13"
+    },
+    {
+      "name": "水利宣传",
+      "article_url": "https://mp.weixin.qq.com/s/dcu34PHLqZExz7Xmom8q-A",
+      "feed_id": "MP_WXS_3097533624",
+      "status": "queued_for_subscription",
+      "verified_at": "2026-08-13"
+    },
+    {
+      "name": "环境人ENV",
+      "article_url": "https://mp.weixin.qq.com/s/R56eOQPesR5stM1mKcLLgQ",
+      "feed_id": "MP_WXS_3877838551",
+      "status": "queued_for_subscription",
+      "verified_at": "2026-08-13"
+    },
+    {
+      "name": "机械之声",
+      "article_url": "https://mp.weixin.qq.com/s/DD1TKJOY5tghS_KFX54krA",
+      "feed_id": "MP_WXS_3087048900",
+      "status": "queued_for_subscription",
+      "verified_at": "2026-08-13"
+    },
+    {
+      "name": "THU臻于至善",
+      "article_url": "https://mp.weixin.qq.com/s/7_SaNXuwcAviEKyP0HOHxw",
+      "feed_id": "MP_WXS_3929717882",
+      "status": "queued_for_subscription",
+      "verified_at": "2026-08-13"
     }
   ],
   "pending_canonical_url": [
     "清华大学",
-    "建院宣传中心",
     "建院学生会THU",
-    "水木华声",
-    "水利宣传",
-    "环境人ENV",
     "环小研",
-    "机械之声",
     "机械正发声",
     "精小仪",
     "精仪系研究生",
@@ -116,7 +162,6 @@
     "探微观止",
     "THU天行健",
     "THU清清园中葵",
-    "THU臻于至善",
     "THU笃实光辉",
     "清华大学无穹书院",
     "清华大学水木书院",

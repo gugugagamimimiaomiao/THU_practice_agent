@@ -135,6 +135,17 @@ class PublishGateTests(unittest.TestCase):
         self.assertEqual(project["practice_end"], "2026-08-16")
         self.assertEqual(project["status"], "published")
 
+    def test_extracts_deadline_written_as_register_before_date(self):
+        notice = "\n".join([
+            "ICBS 2026 清华专场报名",
+            "时间：2026年8月15日9:30-17:30",
+            "请扫描二维码填写问卷报名",
+            "请于2026年8月14日上午10:00前扫码报名",
+        ])
+        project = extract_project(notice, self.META, today=date(2026, 8, 13))
+        self.assertEqual(project["signup_deadline"], "2026-08-14")
+        self.assertEqual(project["status"], "published")
+
     def test_lead_in_line_is_not_mistaken_for_the_eligibility(self):
         """「报名要求：我们希望你是：」本身不含条件，真正的条件在后面几行。
 
