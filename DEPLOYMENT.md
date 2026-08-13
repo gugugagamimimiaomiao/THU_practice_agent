@@ -96,6 +96,7 @@ SQLite 文件位于 `/data/practice_xiaoda.db`，公网部署必须绑定持久�
 - `XIAODA_API_KEY=<随机长密钥>`
 - `ADMIN_API_KEY=<另一随机长密钥>`
 - `PRACTICE_XIAODA_DB=/data/practice_xiaoda.db`
+- `SEED_DEMO_DATA=false`
 - `PUBLIC_DASHBOARD=false`
 
 Render 必须启用持久磁盘并挂载到 `/data`；Railway 也要添加 Volume 挂载 `/data`。平台自带 HTTPS 域名可直接用于清小搭；不要把管理面板公开。
@@ -119,4 +120,4 @@ Render 必须启用持久磁盘并挂载到 `/data`；Railway 也要添加 Volum
 - 当前限流器是单进程内存实现；多副本部署前应换成网关或 Redis 限流。
 - 备份 `/data/practice_xiaoda.db`，并制定删除过期文章与用户反馈的策略。
 - 公众号链接导入可直接读取公开 `mp.weixin.qq.com` 正文；为提高成功率可设置 `WECHAT_COLLECTOR_PATH` 和 `WECHAT_COLLECTOR_PYTHON`。本地产品可在“开发者采集”页手动填写微信 Cookie/Token；公网部署仍应限制开发者页面访问，且绝不能把凭证写进镜像、仓库或 SQLite。
-- 每日自动更新使用 `make daily-wechat-update`，应由单独的 cron/云定时任务运行；默认目标是“清华大学社会实践”“无限之声”“清华大学学生公益”。采集器凭证只能配置在该任务的 Secret 环境中。
+- 每日自动更新使用 `make daily-wechat-update`，应由单独的 cron/云定时任务运行；默认目标是 `wechat_sources.py` 中维护的校级实践相关账号和全部院系/书院官方公众号。采集器凭证只能配置在该任务的 Secret 环境中。

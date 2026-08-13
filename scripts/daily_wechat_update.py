@@ -26,9 +26,9 @@ from domain import deep_merge, extract_project  # noqa: E402
 from opportunity_filter import candidate_decision  # noqa: E402
 from wechat_ingest import collector_credentials_present  # noqa: E402
 from wechat_image_ocr import OCRResult, ocr_wechat_images  # noqa: E402
+from wechat_sources import DEFAULT_ACCOUNTS  # noqa: E402
 
 
-DEFAULT_ACCOUNTS = ("清华大学社会实践", "无限之声", "清华大学学生公益")
 def report_progress(percent: int, stage: str, label: str, *, current: int | None = None, total: int | None = None) -> None:
     """Emit machine-readable, non-secret progress for the developer panel."""
     event: dict[str, Any] = {"event": "progress", "percent": max(0, min(100, int(percent))), "stage": stage, "label": label}
@@ -165,13 +165,17 @@ def collect(args: argparse.Namespace) -> int:
     if not collector.is_file():
         print(json.dumps({"ok": False, "error": "WECHAT_COLLECTOR_PATH is missing or invalid"}, ensure_ascii=False))
         return 2
-    if not collector_credentials_present():
+    is_werss = collector.name == "werss_collector.py"
+    is_public_feed = collector.name == "wewe_collector.py"
+    if not (is_werss or is_public_feed) and not collector_credentials_present():
         print(json.dumps({"ok": False, "error": "set WECHAT_TOKEN and WECHAT_COOKIE in the developer task"}, ensure_ascii=False))
         return 2
     python = os.getenv("WECHAT_COLLECTOR_PYTHON", sys.executable)
     with tempfile.TemporaryDirectory(prefix="practice-xiaoda-daily-") as output_dir:
         environment = {**os.environ, "WECHAT_DIGEST_OUTPUT_DIR": output_dir}
         command = [python, str(collector), "collect", *args.accounts, "--since", args.since, "--count", str(args.count), "--no-kb"]
+        if is_werss and os.getenv("WERSS_DB_PATH"):
+            command[2:2] = ["--database", os.environ["WERSS_DB_PATH"]]
         report_progress(12, "collecting", f"正在拉取 {len(args.accounts)} 个公众号的新文章")
         try:
             completed = subprocess.run(command, env=environment, timeout=args.timeout, capture_output=True, text=True, check=False)
@@ -183,7 +187,8 @@ def collect(args: argparse.Namespace) -> int:
             print(json.dumps({"ok": False, "error": "collector returned no usable article batch"}, ensure_ascii=False))
             return 1
         try:
-            articles = json.loads(files[-1].read_text(encoding="utf-8")).get("articles", [])
+            collector_batch = json.loads(files[-1].read_text(encoding="utf-8"))
+            articles = collector_batch.get("articles", [])
         except (OSError, json.JSONDecodeError):
             print(json.dumps({"ok": False, "error": "collector output was not valid JSON"}, ensure_ascii=False))
             return 1
@@ -193,6 +198,7 @@ def collect(args: argparse.Namespace) -> int:
     summary: dict[str, Any] = {
         "seen": len(articles), "audited": len(valid_articles), "candidate": 0, "non_candidate": 0,
         "imported": 0, "merged": 0, "removed_non_opportunity": 0, "skipped_no_content": 0,
+        "source_mismatch": 0, "collector_partial": bool(collector_batch.get("partial")),
     }
     ocr_stats = {"articles_processed": 0, "articles_with_images": 0, "articles_skipped_by_rule": 0, "attempted": 0, "downloaded": 0, "processed": 0, "completed": 0, "failed": 0}
     audit_records: list[dict[str, Any]] = []
@@ -200,6 +206,17 @@ def collect(args: argparse.Namespace) -> int:
         title = str(article.get("title") or "未命名文章").strip()[:50]
         percent = 30 + int(62 * (index - 1) / max(1, len(valid_articles)))
         report_progress(percent, "ocr_and_classify", f"正在 OCR 与判断文章 {index}/{len(valid_articles)}：{title}", current=index, total=len(valid_articles))
+        requested_account = str(article.get("query") or "").strip()
+        resolved_account = str(article.get("account") or "").strip()
+        if requested_account and resolved_account and requested_account != resolved_account:
+            summary["source_mismatch"] += 1
+            audit_records.append({
+                "title": title, "source_url": str(article.get("link") or ""), "images": len(_article_images(article)),
+                "candidate": False, "candidate_score": 0,
+                "decision_reasons": [f"公众号匹配不一致：请求“{requested_account}”，实际命中“{resolved_account}”"],
+                "ocr": {"skipped_by_rule": True, "attempted": 0, "downloaded": 0, "processed": 0, "text_found": 0, "failed": 0, "failures": []},
+            })
+            continue
         image_sources = _article_images(article)
         pre_decision = candidate_decision(article)
         # A clearly retrospective article (for example “行前预告” or
@@ -246,7 +263,10 @@ def main() -> int:
     parser.add_argument("--database", default=os.getenv("PRACTICE_XIAODA_DB", str(ROOT / "data" / "practice_xiaoda.db")))
     parser.add_argument("--since", default=(date.today() - timedelta(days=2)).isoformat())
     parser.add_argument("--count", type=int, default=int(os.getenv("WECHAT_DAILY_COUNT", "12")))
-    parser.add_argument("--timeout", type=int, default=600)
+    # The upstream collector deliberately sleeps between WeChat requests.
+    # A full department-wide scan needs more headroom than the original
+    # three-account job, while the parent scheduler still enforces a hard cap.
+    parser.add_argument("--timeout", type=int, default=1800)
     parser.add_argument("--accounts", nargs="+", default=list(DEFAULT_ACCOUNTS))
     parser.add_argument("--audit-dir", default=str(ROOT / "data" / "collector_audits"))
     return collect(parser.parse_args())

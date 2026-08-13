@@ -1,0 +1,10 @@
+FROM ghcr.io/rachelos/we-mp-rss:latest
+
+# Upstream apis/auth.py currently imports the configured driver from
+# driver.base and then accidentally overwrites it with driver.wx.  Remove the
+# two duplicate imports so WERSS_AUTH_WEB=False can select the lighter API QR
+# driver as intended by driver/base.py.
+RUN sed -i.bak \
+    -e '/from driver\.wx_api import get_qr_code/d' \
+    -e '/from driver\.wx import WX_API/d' \
+    /app/apis/auth.py

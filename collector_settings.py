@@ -10,11 +10,11 @@ from pathlib import Path
 from typing import Any
 
 from domain import now_iso
+from wechat_sources import DEFAULT_ACCOUNTS, LEGACY_DEFAULT_ACCOUNTS, MAX_ACCOUNTS
 
 
 ROOT = Path(__file__).resolve().parent
 SETTINGS_PATH = Path(os.getenv("PRACTICE_XIAODA_COLLECTOR_SETTINGS", ROOT / "data" / "collector_settings.json"))
-DEFAULT_ACCOUNTS = ["清华大学社会实践", "无限之声", "清华大学学生公益"]
 TIME_PATTERN = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 PROFILE_ID_RE = re.compile(r"[^a-z0-9_-]+")
 
@@ -99,7 +99,9 @@ def _clean_accounts(value: Any) -> list[str]:
     if not isinstance(value, list):
         return list(DEFAULT_ACCOUNTS)
     accounts = list(dict.fromkeys(str(item).strip() for item in value if str(item).strip()))
-    return accounts[:12] or list(DEFAULT_ACCOUNTS)
+    if tuple(accounts) == LEGACY_DEFAULT_ACCOUNTS:
+        return list(DEFAULT_ACCOUNTS)
+    return accounts[:MAX_ACCOUNTS] or list(DEFAULT_ACCOUNTS)
 
 
 def save_from_developer(payload: dict[str, Any]) -> dict[str, Any]:

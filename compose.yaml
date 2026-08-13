@@ -1,4 +1,73 @@
 services:
+  we-mp-rss:
+    build:
+      context: .
+      dockerfile: Dockerfile.werss
+    image: practice-xiaoda/we-mp-rss:patched
+    ports:
+      - "8001:8001"
+    environment:
+      ENABLE_JOB: "True"
+      # Use the HTTP/API QR flow. The patched image restores this setting,
+      # which upstream apis/auth.py currently overrides by mistake.
+      WERSS_AUTH_WEB: "False"
+      # Upstream's legacy web collector currently contains unresolved merge
+      # markers. Use its documented multi-endpoint collector instead. Note:
+      # as checked on 2026-08-12, WeChat may still return ret=200013.
+      GATHER.MODEL: "free_publish"
+      DB: sqlite:///data/we_mp_rss.db
+      USERNAME: ${WERSS_ADMIN_USERNAME:-admin}
+      PASSWORD: ${WERSS_ADMIN_PASSWORD:?set WERSS_ADMIN_PASSWORD in .env}
+    volumes:
+      - werss_data:/app/data
+    restart: unless-stopped
+    profiles: ["legacy-wechat-backend"]
+
+  wewe-rss:
+    image: ${WEWE_IMAGE:-cooderl/wewe-rss-sqlite:latest}
+    ports:
+      - "4000:4000"
+    environment:
+      DATABASE_TYPE: sqlite
+      DATABASE_URL: file:/app/data/wewe-rss.db
+      AUTH_CODE: ${WEWE_AUTH_CODE:?set WEWE_AUTH_CODE in .env}
+      SERVER_ORIGIN_URL: http://127.0.0.1:4000
+      PLATFORM_URL: https://weread.111965.xyz
+      CRON_EXPRESSION: "35 5,17 * * *"
+      UPDATE_DELAY_TIME: "75"
+      MAX_REQUEST_PER_MINUTE: "30"
+      FEED_MODE: fulltext
+    volumes:
+      - wewe_data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:4000/feeds',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+
+  wechat-daily-import:
+    build: .
+    command: ["python3", "-u", "scripts/werss_daily_worker.py"]
+    env_file:
+      - .env
+    environment:
+      PRACTICE_XIAODA_DB: /data/practice_xiaoda.db
+      SEED_DEMO_DATA: "false"
+      WECHAT_COLLECTOR_PATH: /app/scripts/wewe_collector.py
+      WECHAT_COLLECTOR_PYTHON: python3
+      WEWE_BASE_URL: http://wewe-rss:4000
+      WECHAT_DAILY_COUNT: "50"
+      WECHAT_DAILY_TIME: "08:25"
+      WECHAT_RUN_ON_START: "false"
+    volumes:
+      - practice_xiaoda_data:/data
+    depends_on:
+      wewe-rss:
+        condition: service_healthy
+    restart: unless-stopped
+
   practice-xiaoda:
     build: .
     ports:
@@ -10,11 +79,19 @@ services:
       PORT: 8000
       PRACTICE_XIAODA_ENV: production
       PRACTICE_XIAODA_DB: /data/practice_xiaoda.db
+      SEED_DEMO_DATA: "false"
       PUBLIC_DASHBOARD: "false"
+      WECHAT_COLLECTOR_PATH: /app/scripts/wewe_collector.py
+      WECHAT_COLLECTOR_PYTHON: python3
+      WEWE_BASE_URL: http://wewe-rss:4000
     volumes:
       - practice_xiaoda_data:/data
+    depends_on:
+      wewe-rss:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
   practice_xiaoda_data:
-
+  werss_data:
+  wewe_data:

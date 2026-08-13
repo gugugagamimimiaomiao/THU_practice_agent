@@ -6,6 +6,7 @@ ENV PYTHONUNBUFFERED=1 \
     HOST=0.0.0.0 \
     PRACTICE_XIAODA_ENV=production \
     PRACTICE_XIAODA_DB=/data/practice_xiaoda.db \
+    SEED_DEMO_DATA=false \
     PUBLIC_DASHBOARD=false
 
 WORKDIR /app
