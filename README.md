@@ -180,7 +180,7 @@ curl -N http://127.0.0.1:8765/v1/chat/completions \\
 
 ## 真实微信公众号采集边界
 
-> 2026-08-12 更新：公众平台历史列表接口持续返回 `200013`。当前默认使用 WeWe RSS 的微信读书通道发现公开文章，再由 `scripts/wewe_collector.py` 按标题预筛、按需读取正文；`we-mp-rss` 仅保留为诊断备用。迁移、隐私边界、首次回补与每日更新见 [WERSS_MIGRATION.md](WERSS_MIGRATION.md)。
+> 2026-08-13 更新：公众平台历史列表接口持续返回 `200013`。当前默认使用 WeWe RSS 的微信读书通道，且只增量扫描清华大学学生会、清华大学学生社团、清华紫荆之声和清华大学学生公益最近 28 天的文章；不再回补“清华大学社会实践”历史或扫描院系号。`scripts/wewe_collector.py` 按服务器约定的标题规则预筛，并为短正文保留图片 URL；`we-mp-rss` 仅保留为诊断备用。持久化、令牌失效处理与每日更新见 [WEWE_DEPLOYMENT.md](WEWE_DEPLOYMENT.md)。
 
 MVP 的核心流程在无微信凭证时仍可完整运行。真实后台批量采集需要把已有公众号采集器作为上游线索适配器，并在服务进程外安全配置：
 
@@ -195,7 +195,7 @@ export WECHAT_COOKIE=your_cookie
 
 ### 每日更新校级与各院系官方公众号（可选）
 
-项目已包含 `scripts/daily_wechat_update.py`。它只在已配置上游采集器与 `WECHAT_TOKEN`/`WECHAT_COOKIE` 的独立定时工作进程中运行。默认来源包括校级实践相关公众号，以及 THU Book“各院系官方公众号”目录中的全部院系和书院账号；完整清单、来源地址和核对日期统一维护在 `wechat_sources.py`。采集结果先经过实践/招募信号判断，再进入去重、OCR 与人工审核流程。
+项目已包含 `scripts/daily_wechat_update.py`。它只在独立定时工作进程中运行；使用 WeWe 公共 Feed 时不读取或打印微信读书令牌。当前默认来源仅为学生会、学生社团、紫荆之声和学生公益，窗口为最近 28 天。采集结果先经过实践/招募标题规则，再进入去重、图片 OCR 与正式数据流程；缺失字段照实保留，不因正文短或字段不全隐藏整条机会。
 
 ```bash
 export WECHAT_COLLECTOR_PATH=/path/to/wechat_collector.py

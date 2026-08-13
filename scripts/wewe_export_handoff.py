@@ -14,6 +14,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from wewe_collector import extract_images, get_json, html_to_text, iso_date
+from opportunity_filter import candidate_decision
 
 
 def existing_urls(database: Path) -> set[str]:
@@ -33,6 +34,7 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--title-prefix", default="")
     parser.add_argument("--exclude-jsonl", type=Path, action="append", default=[])
+    parser.add_argument("--correction", action="store_true", help="mark every exported row as an authoritative correction")
     args = parser.parse_args()
 
     feeds = get_json("/feeds")
@@ -53,7 +55,12 @@ def main() -> int:
             if isinstance(row, dict) and row.get("source_url"):
                 seen.add(str(row["source_url"]).strip())
     records: list[dict[str, object]] = []
-    for index, item in enumerate(metadata.get("items", []), 1):
+    metadata_items = sorted(
+        (item for item in metadata.get("items", []) if isinstance(item, dict)),
+        key=lambda item: str(item.get("date_modified") or ""),
+        reverse=True,
+    )
+    for item in metadata_items:
         if len(records) >= args.need:
             break
         publish_date = iso_date(str(item.get("date_modified") or ""))
@@ -63,10 +70,18 @@ def main() -> int:
             continue
         if publish_date < args.since or not link.startswith("https://mp.weixin.qq.com/s/") or link in seen:
             continue
-        full = get_json(f"/feeds/{quote(feed_id)}.json", {"limit": 1, "page": index, "mode": "fulltext"})
+        if not candidate_decision({"title": title, "content": ""})["candidate"]:
+            continue
+        original_index = next(
+            index for index, row in enumerate(metadata.get("items", []), 1)
+            if row.get("id") == item.get("id")
+        )
+        full = get_json(f"/feeds/{quote(feed_id)}.json", {"limit": 1, "page": original_index, "mode": "fulltext"})
         match = (full.get("items") or [{}])[0]
-        content = html_to_text(str(match.get("content_html") or "")).strip()
-        if len(content) < 120 or "获取全文失败" in content:
+        content_html = str(match.get("content_html") or "")
+        content = html_to_text(content_html).strip()
+        images = extract_images(content_html)
+        if (not content and not images) or "获取全文失败" in content:
             continue
         record: dict[str, object] = {
             "source_account": args.account,
@@ -75,9 +90,10 @@ def main() -> int:
             "publish_date": publish_date,
             "raw_text": content,
         }
-        images = extract_images(str(match.get("content_html") or ""))
         if images:
             record["images"] = images
+        if args.correction:
+            record["correction"] = True
         records.append(record)
         seen.add(link)
     args.output.parent.mkdir(parents=True, exist_ok=True)

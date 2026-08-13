@@ -29,6 +29,14 @@ from wechat_image_ocr import OCRResult, ocr_wechat_images  # noqa: E402
 from wechat_sources import DEFAULT_ACCOUNTS  # noqa: E402
 
 
+CURRENT_PRIORITY_ACCOUNTS = (
+    "清华大学学生会",
+    "清华大学学生社团",
+    "清华紫荆之声",
+    "清华大学学生公益",
+)
+
+
 def report_progress(percent: int, stage: str, label: str, *, current: int | None = None, total: int | None = None) -> None:
     """Emit machine-readable, non-secret progress for the developer panel."""
     event: dict[str, Any] = {"event": "progress", "percent": max(0, min(100, int(percent))), "stage": stage, "label": label}
@@ -220,13 +228,13 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="每日抓取可信公众号中的社会实践招募线索")
     parser.add_argument("--collector", default=os.getenv("WECHAT_COLLECTOR_PATH", ""))
     parser.add_argument("--database", default=os.getenv("PRACTICE_XIAODA_DB", str(ROOT / "data" / "practice_xiaoda.db")))
-    parser.add_argument("--since", default=(date.today() - timedelta(days=2)).isoformat())
+    parser.add_argument("--since", default=(date.today() - timedelta(days=28)).isoformat())
     parser.add_argument("--count", type=int, default=int(os.getenv("WECHAT_DAILY_COUNT", "12")))
     # The upstream collector deliberately sleeps between WeChat requests.
     # A full department-wide scan needs more headroom than the original
     # three-account job, while the parent scheduler still enforces a hard cap.
     parser.add_argument("--timeout", type=int, default=1800)
-    parser.add_argument("--accounts", nargs="+", default=list(DEFAULT_ACCOUNTS))
+    parser.add_argument("--accounts", nargs="+", default=list(CURRENT_PRIORITY_ACCOUNTS))
     parser.add_argument("--audit-dir", default=str(ROOT / "data" / "collector_audits"))
     return collect(parser.parse_args())
 

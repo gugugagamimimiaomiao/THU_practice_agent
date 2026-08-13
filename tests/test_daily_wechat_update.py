@@ -18,11 +18,12 @@ class DailyWeChatCandidateTests(unittest.TestCase):
         source = SCRIPT.read_text(encoding="utf-8")
         self.assertIn('parser.add_argument("--timeout", type=int, default=1800)', source)
 
-    def test_daily_job_uses_the_shared_department_source_list(self):
-        from wechat_sources import DEFAULT_ACCOUNTS
-        self.assertEqual(daily_wechat_update.DEFAULT_ACCOUNTS, DEFAULT_ACCOUNTS)
-        self.assertIn("无限之声", daily_wechat_update.DEFAULT_ACCOUNTS)
-        self.assertIn("清华大学紫荆书院", daily_wechat_update.DEFAULT_ACCOUNTS)
+    def test_daily_job_limits_default_sources_to_current_priority_accounts(self):
+        self.assertEqual(daily_wechat_update.CURRENT_PRIORITY_ACCOUNTS, (
+            "清华大学学生会", "清华大学学生社团", "清华紫荆之声", "清华大学学生公益",
+        ))
+        self.assertNotIn("清华大学社会实践", daily_wechat_update.CURRENT_PRIORITY_ACCOUNTS)
+        self.assertNotIn("无限之声", daily_wechat_update.CURRENT_PRIORITY_ACCOUNTS)
 
     def test_requires_an_explicit_recruitment_signal(self):
         self.assertTrue(daily_wechat_update.is_candidate({"title": "志愿招募 | 社区暑期儿童科普课堂志愿者招募"}))
@@ -38,13 +39,13 @@ class DailyWeChatCandidateTests(unittest.TestCase):
         self.assertTrue(decision["candidate"])
         self.assertTrue(any("正文/OCR" in reason for reason in decision["reasons"]))
 
-    def test_retrospective_is_excluded_even_if_it_mentions_volunteers(self):
+    def test_title_volunteer_signal_overrides_retrospective_for_server_recheck(self):
         decision = daily_wechat_update.candidate_decision({
             "title": "活动回顾｜志愿者服务纪实",
             "content": "感谢所有志愿者参与。",
         })
-        self.assertFalse(decision["candidate"])
-        self.assertTrue(any("排除信号" in reason for reason in decision["reasons"]))
+        self.assertTrue(decision["candidate"])
+        self.assertTrue(any("覆盖排除" in reason for reason in decision["reasons"]))
 
     def test_marks_image_only_fields_for_ocr_review(self):
         from database import Database

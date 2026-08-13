@@ -6,6 +6,7 @@ from typing import Any
 
 
 RECRUITMENT_WORDS = ("招募", "报名", "志愿者", "招新", "选拔", "申请", "征集", "加入", "组队")
+TITLE_OVERRIDE_WORDS = ("招募", "报名", "招新", "志愿者")
 ACTION_WORDS = (
     "报名方式", "申请方式", "报名通道", "报名链接", "报名表", "报名截止", "截止日期",
     "招募对象", "报名对象", "参与对象", "招募要求", "报名要求",
@@ -39,17 +40,24 @@ def candidate_decision(article: dict[str, Any], ocr_text: str = "") -> dict[str,
     title = str(article.get("title") or "").strip()
     body = f"{article.get('content') or ''}\n{ocr_text}".strip()
     title_hits = [word for word in RECRUITMENT_WORDS if word in title]
+    title_overrides = [word for word in TITLE_OVERRIDE_WORDS if word in title]
     body_hits = [word for word in RECRUITMENT_WORDS if word in body]
     action_hits = [word for word in ACTION_WORDS if word in body]
     # A recruitment notice can mention a previous “结项” or an old activity
     # in its body.  Editorial/review labels are therefore title signals; only
     # an explicit closed-recruitment phrase may exclude from the full body.
-    excluded = [word for word in TITLE_EXCLUDE_WORDS if word in title]
-    excluded += [word for word in TERMINAL_EXCLUDE_WORDS if word in title or word in body]
+    genre_excluded = [word for word in TITLE_EXCLUDE_WORDS if word in title]
+    terminal_excluded = [word for word in TERMINAL_EXCLUDE_WORDS if word in title or word in body]
+    excluded = genre_excluded + terminal_excluded
     score = (3 if title_hits else 0) + (2 if body_hits else 0) + (2 if action_hits else 0)
     if "招募" in body and any(char.isdigit() for char in body):
         score += 1
-    if excluded:
+    # The receiving server explicitly wants real calls for applicants even
+    # when an editorial prefix also looks like a recap or resource feature.
+    # Example: “实践基地进清华｜...项目，招募启动！”.  The override is title
+    # only: an old recap merely mentioning recruitment in its body stays out.
+    effective_excluded = terminal_excluded + (genre_excluded if not title_overrides else [])
+    if effective_excluded:
         score -= 8
     reasons: list[str] = []
     if title_hits:
@@ -73,9 +81,14 @@ def candidate_decision(article: dict[str, Any], ocr_text: str = "") -> dict[str,
     actionable = bool(title_hits or action_hits)
     if not actionable:
         reasons.append("正文提到招募，但没有标题信号，也没有任何报名方式/对象/名额线索")
+    if excluded and title_overrides:
+        reasons.append(f"标题强招募信号覆盖排除：{'、'.join(title_overrides[:3])}")
+    # An explicit retrospective label with no signup action can be skipped
+    # before image OCR.  If it contains a real signup flow, still OCR it for
+    # audit, but never promote it automatically.
     return {
-        "candidate": score >= 3 and actionable and not excluded,
+        "candidate": score >= 3 and actionable and not effective_excluded,
         "score": score,
         "reasons": reasons,
-        "hard_excluded": bool(excluded) and not bool(action_hits),
+        "hard_excluded": bool(effective_excluded) and not bool(action_hits),
     }

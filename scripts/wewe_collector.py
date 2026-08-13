@@ -21,11 +21,14 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from opportunity_filter import candidate_decision  # noqa: E402
+
 
 BASE_URL = os.getenv("WEWE_BASE_URL", "http://127.0.0.1:4000").rstrip("/")
 OUTPUT_DIR = Path(os.getenv("WECHAT_DIGEST_OUTPUT_DIR", "output/social-practice-wechat-digest"))
-DISCOVERY_WORDS = ("招募", "报名", "志愿者", "志愿招募", "志愿服务", "招募志愿", "招新", "选拔", "申请", "征集", "加入", "组队")
-EXCLUDE_WORDS = ("总结", "回顾", "纪实", "行前预告", "成果展示", "结项")
 IMAGE_RE = re.compile(r"<(?:img|source)\b[^>]*(?:data-src|src)=[\"']([^\"']+)", re.I)
 
 
@@ -97,7 +100,7 @@ def discover_feeds() -> dict[str, str]:
 
 
 def likely_candidate(title: str) -> bool:
-    return any(word in title for word in DISCOVERY_WORDS) and not any(word in title for word in EXCLUDE_WORDS)
+    return bool(candidate_decision({"title": title, "content": ""})["candidate"])
 
 
 def collect_articles(accounts: list[str], since: str, count: int) -> tuple[list[dict[str, Any]], list[str], list[dict[str, str]]]:
@@ -110,13 +113,20 @@ def collect_articles(accounts: list[str], since: str, count: int) -> tuple[list[
         if not feed_id:
             continue
         metadata = get_json(f"/feeds/{quote(feed_id)}.json", {"limit": max(count * 3, 100), "page": 1, "mode": "metadata"})
-        candidates = [item for item in metadata.get("items", []) if isinstance(item, dict)
-                      and iso_date(str(item.get("date_modified") or "")) >= since
-                      and likely_candidate(str(item.get("title") or ""))][:count]
-        metadata_items = metadata.get("items", [])
+        original_items = [item for item in metadata.get("items", []) if isinstance(item, dict)]
+        metadata_items = sorted(
+            original_items,
+            key=lambda item: str(item.get("date_modified") or ""),
+            reverse=True,
+        )
+        candidates = [
+            item for item in metadata_items
+            if iso_date(str(item.get("date_modified") or "")) >= since
+            and likely_candidate(str(item.get("title") or ""))
+        ][:count]
         for item in candidates:
             try:
-                original_index = next(i for i, row in enumerate(metadata_items, 1) if row.get("id") == item.get("id"))
+                original_index = next(i for i, row in enumerate(original_items, 1) if row.get("id") == item.get("id"))
                 full = get_json(f"/feeds/{quote(feed_id)}.json", {"limit": 1, "page": original_index, "mode": "fulltext"})
                 match = (full.get("items") or [{}])[0]
                 content_html = str(match.get("content_html") or "")

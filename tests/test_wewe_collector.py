@@ -19,6 +19,8 @@ class WeweCollectorTests(unittest.TestCase):
         self.assertTrue(MODULE.likely_candidate("社区志愿招募通知"))
         self.assertTrue(MODULE.likely_candidate("志愿服务报名"))
         self.assertFalse(MODULE.likely_candidate("实践总结｜支队纪实"))
+        self.assertTrue(MODULE.likely_candidate("成果展示｜秋季志愿者招募启动"))
+        self.assertFalse(MODULE.likely_candidate("工作简报｜秋季志愿服务回顾"))
 
     def test_iso_date(self):
         self.assertEqual(MODULE.iso_date("2026-07-10T12:26:03.000Z"), "2026-07-10")

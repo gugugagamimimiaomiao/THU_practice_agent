@@ -27,6 +27,40 @@ class OpportunityFilterTests(unittest.TestCase):
         result = candidate_decision({"title": "2026年秋校团委志愿中心组长招募", "content": "上一届工作已结项，现开放报名通道并招募新组长。"})
         self.assertTrue(result["candidate"])
 
+    def test_all_server_title_exclusions_are_rejected(self):
+        for phrase in (
+            "资源推介", "基地推介", "基地介绍", "风采展示", "实践日报", "工作简报",
+            "实践简报", "实践总结", "实践纪实", "经验分享", "心得体会", "选课说明",
+            "学习说明", "培训说明", "课程说明", "圆满结束", "顺利举行", "圆满举行",
+            "成功举办", "结项", "成果展示", "行前预告", "活动回顾", "侧记",
+        ):
+            with self.subTest(phrase=phrase):
+                result = candidate_decision({"title": f"{phrase}｜清华活动", "content": ""})
+                self.assertFalse(result["candidate"])
+                self.assertTrue(result["hard_excluded"])
+
+    def test_title_recruitment_signal_overrides_editorial_exclusion(self):
+        result = candidate_decision({
+            "title": "实践基地进清华｜2026年项目成果展示，招募启动！",
+            "content": "",
+        })
+        self.assertTrue(result["candidate"])
+        self.assertFalse(result["hard_excluded"])
+
+    def test_body_only_recruitment_does_not_override_recap_title(self):
+        result = candidate_decision({
+            "title": "暑期实践活动回顾",
+            "content": "回顾此前志愿者招募和报名情况。",
+        })
+        self.assertFalse(result["candidate"])
+
+    def test_explicit_recruitment_end_is_never_overridden(self):
+        result = candidate_decision({
+            "title": "志愿者报名结束通知",
+            "content": "本轮招募已经结束，请关注后续活动。",
+        })
+        self.assertFalse(result["candidate"])
+
 
 class RealDataRegressionTests(unittest.TestCase):
     """来自真实公众号数据的回归。标题和文风照抄线上样本，只改掉具体地名。

@@ -58,7 +58,7 @@ services:
       WECHAT_COLLECTOR_PATH: /app/scripts/wewe_collector.py
       WECHAT_COLLECTOR_PYTHON: python3
       WEWE_BASE_URL: http://wewe-rss:4000
-      WECHAT_DAILY_COUNT: "50"
+      WECHAT_DAILY_COUNT: "12"
       WECHAT_DAILY_TIME: "08:25"
       WECHAT_RUN_ON_START: "false"
     volumes:
