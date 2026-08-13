@@ -81,8 +81,9 @@
       "name": "水木华声",
       "article_url": "https://mp.weixin.qq.com/s/qZ8x-RQ344D8xOZ29dP1ow",
       "feed_id": "MP_WXS_3944665780",
-      "status": "queued_for_subscription",
-      "verified_at": "2026-08-13"
+      "status": "subscribed",
+      "verified_at": "2026-08-13",
+      "activated_at": "2026-08-13"
     },
     {
       "name": "水利宣传",
