@@ -6,4 +6,7 @@ data/*.db-*
 data/collector_settings.json
 data/collector_audits/
 data/exports/
+data/collection_quality_report.json
+data/collection_quality_samples.jsonl
+data/wechat_backfill_state.json
 .env

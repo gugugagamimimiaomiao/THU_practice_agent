@@ -48,6 +48,7 @@ from wechat_ingest import collector_credentials_present, import_article_text, im
 from collector_scheduler import DailyCollectorScheduler
 from collector_settings import credentials as collector_credentials, delete_profile, public_status, save_from_developer, select_profile
 from route_lookup import query_routes
+from wechat_sources import MAX_ACCOUNTS
 
 
 ROOT = Path(__file__).resolve().parent
@@ -440,7 +441,7 @@ class Handler(BaseHTTPRequestHandler):
             if raw_accounts is not None:
                 if not isinstance(raw_accounts, list) or not all(isinstance(item, str) for item in raw_accounts):
                     raise APIError(422, "历史回补公众号必须是字符串列表")
-                accounts = list(dict.fromkeys(item.strip() for item in raw_accounts if item.strip()))[:12]
+                accounts = list(dict.fromkeys(item.strip() for item in raw_accounts if item.strip()))[:MAX_ACCOUNTS]
                 if not accounts:
                     raise APIError(422, "请至少提供一个历史回补公众号")
             started, message = SCHEDULER.trigger(since=since, count=count, accounts=accounts)

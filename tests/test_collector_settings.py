@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 import collector_settings
+from wechat_sources import DEFAULT_ACCOUNTS, LEGACY_DEFAULT_ACCOUNTS
 
 
 class CollectorSettingsTests(unittest.TestCase):
@@ -58,6 +59,22 @@ class CollectorSettingsTests(unittest.TestCase):
         result = collector_settings.delete_profile(second["active_profile_id"])
         self.assertEqual(len(result["profiles"]), 1)
         self.assertEqual(result["active_profile_id"], first["active_profile_id"])
+
+    def test_defaults_cover_all_department_accounts(self):
+        status = collector_settings.public_status()
+        self.assertEqual(status["accounts"], list(DEFAULT_ACCOUNTS))
+        self.assertGreater(len(status["accounts"]), 60)
+        for account in ("建院宣传中心", "无限之声", "清华经管家园", "清华大学紫荆书院"):
+            self.assertIn(account, status["accounts"])
+
+    def test_untouched_legacy_defaults_are_migrated(self):
+        status = collector_settings.save_from_developer({"accounts": list(LEGACY_DEFAULT_ACCOUNTS)})
+        self.assertEqual(status["accounts"], list(DEFAULT_ACCOUNTS))
+
+    def test_explicit_large_account_list_is_not_truncated_at_twelve(self):
+        accounts = [f"院系公众号{i}" for i in range(30)]
+        status = collector_settings.save_from_developer({"accounts": accounts})
+        self.assertEqual(status["accounts"], accounts)
 
 
 if __name__ == "__main__":

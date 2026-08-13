@@ -49,7 +49,8 @@ class DailyCollectorScheduler:
         token, cookie = credentials()
         if not settings.get("collector_path"):
             return False, "请先填写公众号采集器脚本路径。"
-        if not token or not cookie:
+        uses_werss = Path(str(settings.get("collector_path"))).name == "werss_collector.py"
+        if not uses_werss and (not token or not cookie):
             return False, "请先填写微信 Token 和 Cookie。"
         with self._lock:
             if self._running:
@@ -118,7 +119,10 @@ class DailyCollectorScheduler:
             threading.Thread(target=drain, args=(process.stdout, "stdout"), daemon=True).start()
             threading.Thread(target=drain, args=(process.stderr, "stderr"), daemon=True).start()
             open_streams = {"stdout", "stderr"}
-            deadline = time.monotonic() + 900
+            # The default source set now covers every department and college.
+            # Allow the child its 30-minute polite crawl window plus time to
+            # OCR, persist projects, and write the audit report.
+            deadline = time.monotonic() + 2100
             timed_out = False
             while open_streams:
                 if time.monotonic() >= deadline and process.poll() is None:
