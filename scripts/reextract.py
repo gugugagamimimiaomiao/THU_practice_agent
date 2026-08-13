@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from collections import Counter
 from pathlib import Path
@@ -38,6 +39,83 @@ WATCHED = (
 )
 
 
+def run_pending_ocr(database: Database, *, apply: bool) -> int:
+    """识别 image_ocr_status=pending 的项目配图，把文字并入正文后重抽。
+
+    投稿接口刻意不做同步 OCR——下载加识别几十秒，会把采集方的推送拖到超时。
+    所以入库时只存图片 URL、状态标 pending，由这一趟补上。
+
+    没装 tesseract 时不报错也不假装成功：状态改成 runtime_unavailable，
+    图片 URL 保留，装好引擎再跑一次就行。
+    """
+    from wechat_image_ocr import ocr_wechat_images  # 只有这条路用得到，放函数里导入
+
+    pending = []
+    for summary in database.list_projects(include_expired=True):
+        project = database.get_project(summary["id"])
+        if project and project.get("image_ocr_status") == "pending" and project.get("image_sources"):
+            pending.append(project)
+    print(f"待识别配图的项目 {len(pending)} 条\n")
+    if not pending:
+        return 0
+
+    done = 0
+    for project in pending:
+        images = project["image_sources"]
+        result = ocr_wechat_images(images, cookie=os.getenv("WECHAT_COOKIE", ""))
+        if not result.runtime_available:
+            print(f"── 未装 OCR 引擎，跳过并保留图片 URL：{project['title'][:36]}")
+            project["image_ocr_status"] = "runtime_unavailable"
+            if apply:
+                database.upsert_project(project, note="缺少 OCR 引擎，配图待后续识别")
+            continue
+
+        print(f"── {project['title'][:36]}")
+        print(f"     {len(images)} 张图，识别到文字 {result.completed} 张，失败 {result.failed} 张")
+        if not result.text.strip():
+            project["image_ocr_status"] = "partial_or_failed"
+            if apply:
+                database.upsert_project(project, note="配图未识别出文字")
+            continue
+
+        article = _latest_article(database, project.get("source_url", ""))
+        base_text = article["raw_text"] if article else project.get("title", "")
+        merged_text = f"{base_text}\n\n【公众号配图 OCR】\n{result.text}"
+        fresh = extract_project(merged_text, {
+            "title": project.get("title", ""),
+            "source_account": project.get("source_account", ""),
+            "source_url": project.get("source_url", ""),
+            "input_type": "ocr_text",
+        })
+        fresh["id"] = project["id"]
+        fresh["created_at"] = project.get("created_at", fresh["created_at"])
+        fresh["image_sources"] = images
+        fresh["image_ocr_status"] = "completed"
+        fresh["risk_notes"] = list(dict.fromkeys(
+            fresh.get("risk_notes", []) + ["关键字段来自配图 OCR，发布前请与原图核对日期、金额和联系方式"]))
+        for field in ("signup_deadline", "practice_start", "location", "eligibility"):
+            before, after = describe(project, field), describe(fresh, field)
+            if before != after:
+                print(f"     {field:<16} {before[:34]}  →  {after[:34]}")
+        if apply:
+            database.upsert_project(fresh, note="配图 OCR 后重抽")
+        done += 1
+
+    print()
+    print(f"完成 {done} 条" + ("" if apply else "（预演，没有写库；确认后加 --apply）"))
+    return 0
+
+
+def _latest_article(database: Database, source_url: str) -> dict | None:
+    if not source_url:
+        return None
+    with database.connect() as db:
+        row = db.execute(
+            "SELECT raw_text FROM articles WHERE source_url=? ORDER BY id DESC LIMIT 1", (source_url,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
 def describe(project: dict, field: str) -> str:
     if field == "eligibility":
         return (project.get("eligibility") or {}).get("restriction_text") or "(空)"
@@ -51,7 +129,12 @@ def main() -> int:
     parser.add_argument("--apply", action="store_true", help="真的写回数据库（默认只预演）")
     parser.add_argument("--only-status", default="needs_review,expired",
                         help="只重抽这些状态的项目，逗号分隔；传 all 表示不限")
+    parser.add_argument("--ocr", action="store_true",
+                        help="先识别待处理的原文配图，把识别文字并入正文再重抽")
     args = parser.parse_args()
+
+    if args.ocr:
+        return run_pending_ocr(Database(), apply=args.apply)
 
     database = Database()
     allowed = None if args.only_status == "all" else {

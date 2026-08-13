@@ -6,6 +6,7 @@ from database import Database
 from wechat_ingest import (
     _ArticleParser,
     WeChatFetchResult,
+    import_article_text,
     import_wechat_link,
     validate_wechat_url,
 )
@@ -114,6 +115,51 @@ class WeChatIngestTests(unittest.TestCase):
             self.assertIn("本科生", project["eligibility"]["grades"])
             self.assertNotIn("reimbursement", project["uncertain_fields"])
             self.assertNotIn("practice_dates", project["uncertain_fields"])
+
+    def test_image_only_article_keeps_its_image_urls_and_waits_for_review(self):
+        """图片型推送：不能丢图片 URL，也不能拿空卡冒充信息齐全。
+
+        采集方对"正文只有一张长图"的推送会把图片 URL 放在 images 里。这条路
+        以前完全没接——articles 表没有对应的列，入库管线也不看这个字段，
+        URL 就无声无息地没了，只剩一张几乎空白的项目卡。取消人工核验之后，
+        这种卡会直接进正式推荐。
+        """
+        url = "https://mp.weixin.qq.com/s?mid=image-only"
+        images = ["https://mmbiz.qpic.cn/mmbiz_jpg/a/640", "https://mmbiz.qpic.cn/mmbiz_jpg/b/640"]
+        with tempfile.TemporaryDirectory() as folder:
+            database = Database(Path(folder) / "test.db")
+            result = import_article_text(
+                database,
+                {"title": "社团纳新丨2026年秋季学期学生社团招新启动", "source_url": url,
+                 "source_account": "清华大学学生社团", "images": images},
+                "详见下图。",
+            )
+            project = result["project"]
+            self.assertEqual(project["image_sources"], images, "图片 URL 丢了")
+            self.assertEqual(project["image_ocr_status"], "pending")
+            self.assertEqual(project["status"], "needs_review", "空卡不该直接进正式推荐")
+            self.assertTrue(any("配图" in note for note in project["risk_notes"]))
+
+    def test_short_but_complete_notice_with_images_still_publishes(self):
+        """短不等于空。字段齐全的通知即使正文短、另有配图，也该正常发布。
+
+        一开始拿正文长度当代用指标，结果一条 137 字、截止日期和报名方式都
+        抽到了的通知被降级成待核验。该看的是抽出来的字段够不够用。
+        """
+        url = "https://mp.weixin.qq.com/s?mid=short-complete"
+        with tempfile.TemporaryDirectory() as folder:
+            database = Database(Path(folder) / "test.db")
+            result = import_article_text(
+                database,
+                {"title": "学生会招新丨2026年秋季学期干事招募", "source_url": url,
+                 "source_account": "清华大学学生会", "images": ["https://mmbiz.qpic.cn/c/640"]},
+                "现面向全校招募新一届干事。\n报名截止：2036年9月10日\n"
+                "参与资格：全校本科生均可报名\n报名方式：填写问卷并提交",
+            )
+            project = result["project"]
+            self.assertEqual(project["status"], "published")
+            self.assertEqual(project["image_ocr_status"], "pending")
+            self.assertEqual(len(project["image_sources"]), 1)
 
     def test_marked_correction_overrides_even_when_it_says_less(self):
         """数据维护方明确标记的订正必须生效，哪怕新版本信息更少。

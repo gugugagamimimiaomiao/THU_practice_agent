@@ -278,6 +278,47 @@ def import_wechat_link(
     )
 
 
+# 判断"信息是不是都在图里"，看的是抽出来的字段够不够用，不是正文有多长。
+# 一开始用正文长度当代用指标，结果一条 137 字、截止日期资格报名方式全都抽到的
+# 通知被降级成待核验——短不等于空。这三项一个都没抽到才说明正文确实没内容。
+_KEY_FIELDS_FOR_IMAGE_CHECK = ("signup_deadline", "signup_method")
+
+
+def _attach_image_sources(project: dict[str, Any], metadata: dict[str, Any], raw_text: str) -> None:
+    """把原文配图挂到项目上，并如实标注识别状态。
+
+    采集方对图片型推送（正文只有一张长图、文字全在图里）会把图片 URL 放在
+    metadata["images"] 里。这条路以前完全没接：articles 表没有对应的列，
+    import_article_text 也不看这个字段，图片 URL 就这么无声无息地没了——
+    留下一张几乎空白的项目卡，而且取消人工核验之后它会直接进正式推荐。
+
+    这里不做同步 OCR：下载加识别可能要几十秒，而采集方是一篇一篇 POST 过来的，
+    会直接把请求拖到超时。改成先把 URL 存住、状态标成 pending，OCR 由
+    scripts/reextract.py --ocr 单独跑一趟。
+    """
+    images = [str(url).strip() for url in (metadata.get("images") or []) if str(url).strip()]
+    images = list(dict.fromkeys(images))
+    if not images:
+        project.setdefault("image_sources", [])
+        project.setdefault("image_ocr_status", "not_needed")
+        return
+
+    project["image_sources"] = images
+    project["image_ocr_status"] = "pending"
+
+    got_nothing = not any(project.get(field) for field in _KEY_FIELDS_FOR_IMAGE_CHECK) and not (
+        project.get("eligibility") or {}).get("restriction_text")
+    if got_nothing:
+        # 怎么报、什么时候截止、谁能报，一个都没抽到——信息确实都在图里。
+        # 这种不该冒充"信息齐全"进正式推荐，学生看了也没法判断。
+        project["status"] = "needs_review"
+        note = (f"关键信息在 {len(images)} 张配图里，配图尚未识别，"
+                "正文没有报名截止、资格或报名方式。核对原文后再发布。")
+    else:
+        note = f"原文另有 {len(images)} 张配图尚未识别，图中可能包含补充的日期或资格信息。"
+    project["risk_notes"] = list(dict.fromkeys(project.get("risk_notes", []) + [note]))
+
+
 def import_article_text(
     database: Database,
     metadata: dict[str, Any],
@@ -326,6 +367,7 @@ def import_article_text(
         }
     project = extract_project(raw_text, metadata)
     project["article_id"] = article_id
+    _attach_image_sources(project, metadata, raw_text)
     duplicate = database.find_duplicate(project)
     merged = False
     if duplicate and correction:
