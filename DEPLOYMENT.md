@@ -79,6 +79,18 @@ docker compose -f compose.yaml -f compose.public.yaml up -d --build
 
 ## 5. Docker 运行
 
+### 5.1 迁移已有项目库
+
+在本机用 SQLite backup API 生成一致性快照，不要直接复制运行中的 `.db`、`-wal`、`-shm` 文件：
+
+```bash
+python3 scripts/export_database_snapshot.py \
+  --database data/practice_xiaoda.db \
+  --output /tmp/practice_xiaoda.db.gz
+```
+
+服务器上先启动应用并停止写入，再解压到持久化目录，运行 `PRAGMA integrity_check` 后重启服务。WeWe 的 `wewe_data` 卷必须单独迁移，不能从 GitHub 恢复，也不能和项目库快照混在一起。
+
 ```bash
 docker build -t practice-xiaoda .
 docker run --rm -p 8000:8000 \\
