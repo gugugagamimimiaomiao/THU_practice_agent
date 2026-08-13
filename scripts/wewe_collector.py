@@ -24,7 +24,7 @@ from urllib.request import Request, urlopen
 
 BASE_URL = os.getenv("WEWE_BASE_URL", "http://127.0.0.1:4000").rstrip("/")
 OUTPUT_DIR = Path(os.getenv("WECHAT_DIGEST_OUTPUT_DIR", "output/social-practice-wechat-digest"))
-DISCOVERY_WORDS = ("招募", "报名", "志愿者", "招新", "选拔", "申请", "征集", "加入", "组队")
+DISCOVERY_WORDS = ("招募", "报名", "志愿者", "志愿招募", "志愿服务", "招募志愿", "招新", "选拔", "申请", "征集", "加入", "组队")
 EXCLUDE_WORDS = ("总结", "回顾", "纪实", "行前预告", "成果展示", "结项")
 IMAGE_RE = re.compile(r"<(?:img|source)\b[^>]*(?:data-src|src)=[\"']([^\"']+)", re.I)
 
