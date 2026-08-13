@@ -199,41 +199,59 @@ def _find_deadline(lines: list[str], today: date) -> tuple[str | None, str]:
     系统因此不知道这条已经截止，而这批暑期实践的截止日期都在 6 月——一旦
     人工核验放行，就会把早就报不了名的项目推给用户。
     """
+    explicit: list[tuple[str, str]] = []
     for index, line in enumerate(lines):
         if not any(label in line for label in DEADLINE_LABELS):
             continue
         parsed = parse_date_from_text(line, today.year)
         if parsed:
-            return parsed, line
+            explicit.append((parsed, line))
+            continue
         # 标签在这一行、日期在下一行。只往后看两行，再远就不像是同一个字段了。
         for offset in (1, 2):
             if index + offset >= len(lines):
                 break
             parsed = parse_date_from_text(lines[index + offset], today.year)
             if parsed:
-                return parsed, f"{line} {lines[index + offset]}".strip()
-        return None, line
+                explicit.append((parsed, f"{line} {lines[index + offset]}".strip()))
+                break
+    if explicit:
+        # 一篇混合通知可能同时包含领票、观众报名和志愿者招募，各自有截止
+        # 日期。只取正文里第一个会把仍开放的后续招募误判成整篇过期；最晚的
+        # 明确截止代表这篇通知中最后一个仍可能报名的入口。
+        return max(explicit, key=lambda item: item[0])
 
     # 没有明确标签时才退回宽松线索，并且要求同一行里确实有日期。
     # 光靠「截止」两个字太容易误伤——真实数据里就有「美育不止」这种标题。
+    hinted: list[tuple[str, str]] = []
     for line in lines:
         if any(hint in line for hint in DEADLINE_HINTS):
             parsed = parse_date_from_text(line, today.year)
             if parsed:
-                return parsed, line
+                hinted.append((parsed, line))
+    if hinted:
+        return max(hinted, key=lambda item: item[0])
     return None, ""
 
 
 def _extract_dates(lines: list[str], today: date) -> tuple[str | None, str | None, str | None, dict[str, Any]]:
     deadline, deadline_line = _find_deadline(lines, today)
 
-    practice_line = _find_line(lines, ["实践时间", "活动时间", "项目时间", "调研时间", "出发时间"])
+    practice_line = _find_line(lines, [
+        "实践时间", "活动时间", "项目时间", "调研时间", "出发时间",
+        "志愿工作时间", "工作时间", "服务时间",
+    ])
     # Many volunteer notices use a standalone “时间安排” heading and place
     # the actual dates on subsequent lines.  Treat that labeled block as an
     # explicit schedule, rather than leaving dates unparsed.
     if not list(DATE_RE.finditer(practice_line)):
         practice_line = _find_section(lines, ["时间安排", "工作时间", "服务时间", "排班安排"])
-    matches = list(DATE_RE.finditer(practice_line))
+    matches = []
+    for match in DATE_RE.finditer(practice_line):
+        context = practice_line[max(0, match.start() - 24):min(len(practice_line), match.end() + 24)]
+        if any(label in context for label in DEADLINE_LABELS) or any(hint in context for hint in DEADLINE_HINTS):
+            continue
+        matches.append(match)
     practice_start = practice_end = None
     if matches:
         practice_start = parse_date_from_text(matches[0].group(0), today.year)

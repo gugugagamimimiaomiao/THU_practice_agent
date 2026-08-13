@@ -25,6 +25,15 @@ def export(database: Path, output: Path, limit: int) -> list[dict]:
         FROM projects AS p
         JOIN articles AS a ON a.id = json_extract(p.document, '$.article_id')
         WHERE COALESCE(json_extract(p.document, '$.demo_data'), 0) = 0
+          AND p.status IN ('published', 'needs_review')
+          AND (
+              trim(COALESCE(p.signup_deadline, '')) = ''
+              OR date(p.signup_deadline) >= date('now')
+          )
+          AND (
+              trim(COALESCE(json_extract(p.document, '$.practice_end'), '')) = ''
+              OR date(json_extract(p.document, '$.practice_end')) >= date('now')
+          )
           AND length(trim(COALESCE(a.raw_text, ''))) >= 120
           AND trim(COALESCE(json_extract(p.document, '$.publish_date'), '')) != ''
           AND trim(COALESCE(p.source_url, '')) != ''
