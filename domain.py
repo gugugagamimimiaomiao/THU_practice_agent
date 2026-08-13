@@ -173,9 +173,59 @@ def _evidence(line: str, input_type: str) -> dict[str, str] | None:
     }
 
 
+# 报名截止的明确标签。这一份被 _NOTICE_FIELD_LABELS 复用，两处不能再分叉——
+# 之前合并排版用的表里有「截止日期」，抽取用的表里没有，导致最标准的写法
+# 「截止日期：2026年6月18日」反而抽不到。
+DEADLINE_LABELS = (
+    "报名截止", "截止日期", "截止时间", "报名截至", "截至日期", "截至时间",
+    "申报截止", "报名截止至", "提交截止", "投递截止", "报名结束", "报名时间",
+)
+# 宽松线索。只在没有明确标签、且同一行里真的有日期时才用。
+DEADLINE_HINTS = ("截止", "截至")
+
+
+def _find_deadline(lines: list[str], today: date) -> tuple[str | None, str]:
+    """找报名截止日期，返回 (ISO 日期, 作为证据的原文行)。
+
+    实测 24 篇真实推送后重写。截止日期的写法比预想的散：
+
+        报名截止：2026年9月1日18:00          标准写法
+        截止日期：2026年6月18日中午12:00      标签换了个说法
+        截至日期：6.16号                     用「截至」，日期写成 6.16
+        报名表提交截止日期：⏎ 2026年6月7日     标签一行、值在下一行
+        （本问卷将于6月3日 24点截止）          日期在关键词前面，还裹在括号里
+
+    只认「报名截止」一种写法的话，这 5 篇全都漏掉。漏掉的后果不是少个字段：
+    系统因此不知道这条已经截止，而这批暑期实践的截止日期都在 6 月——一旦
+    人工核验放行，就会把早就报不了名的项目推给用户。
+    """
+    for index, line in enumerate(lines):
+        if not any(label in line for label in DEADLINE_LABELS):
+            continue
+        parsed = parse_date_from_text(line, today.year)
+        if parsed:
+            return parsed, line
+        # 标签在这一行、日期在下一行。只往后看两行，再远就不像是同一个字段了。
+        for offset in (1, 2):
+            if index + offset >= len(lines):
+                break
+            parsed = parse_date_from_text(lines[index + offset], today.year)
+            if parsed:
+                return parsed, f"{line} {lines[index + offset]}".strip()
+        return None, line
+
+    # 没有明确标签时才退回宽松线索，并且要求同一行里确实有日期。
+    # 光靠「截止」两个字太容易误伤——真实数据里就有「美育不止」这种标题。
+    for line in lines:
+        if any(hint in line for hint in DEADLINE_HINTS):
+            parsed = parse_date_from_text(line, today.year)
+            if parsed:
+                return parsed, line
+    return None, ""
+
+
 def _extract_dates(lines: list[str], today: date) -> tuple[str | None, str | None, str | None, dict[str, Any]]:
-    deadline_line = _find_line(lines, ["报名截止", "截止时间", "报名截至", "申报截止", "报名截止至"])
-    deadline = parse_date_from_text(deadline_line, today.year)
+    deadline, deadline_line = _find_deadline(lines, today)
 
     practice_line = _find_line(lines, ["实践时间", "活动时间", "项目时间", "调研时间", "出发时间"])
     # Many volunteer notices use a standalone “时间安排” heading and place
@@ -241,6 +291,12 @@ def _extract_themes(text: str) -> list[str]:
     tags = [theme for theme, words in THEME_KEYWORDS.items() if any(word.lower() in text.lower() for word in words)]
     return tags[:5] or ["综合实践"]
 
+
+# 主办单位。刻意不收「项目方」——它会命中「新创项目方案打磨」里的
+# 「项目方」，实测因此把一整段部门介绍抽成了主办单位，而那篇原文压根
+# 没写主办单位。凭空造出一个字段值，比留空严重得多。
+ORGANIZER_KEYWORDS = ["主办单位", "承办单位", "组织单位", "发起单位", "主办方", "承办方", "指导单位"]
+MAX_ORGANIZER = 40
 
 LOCATION_KEYWORDS = ["实践地点", "活动地点", "项目地点", "调研地点", "地点："]
 # 地点写到"云南省大理白族自治州祥云县某某镇"已经很长了；超过这个长度基本是抽串行了。
@@ -354,7 +410,7 @@ def _extract_materials(text: str) -> list[str]:
 
 # 招募通知里常见的字段标签。用于把"标签独占一行、值在下一行"的排版合并起来。
 _NOTICE_FIELD_LABELS = frozenset({
-    "报名截止", "截止时间", "报名截至", "申报截止", "报名时间", "截止日期",
+    *DEADLINE_LABELS,  # 与抽取用的表共用一份，避免两处再次分叉
     "实践时间", "活动时间", "项目时间", "实践日期", "行程时间",
     "实践地点", "活动地点", "项目地点", "调研地点", "地点",
     "招募对象", "面向对象", "报名对象", "参与对象", "招募要求", "报名要求",
@@ -420,8 +476,8 @@ def extract_project(raw_text: str, metadata: dict[str, Any] | None = None, *, to
     location, location_line = _extract_location(lines, cleaned)
     eligibility, eligibility_line = _extract_eligibility(lines)
     reimbursement, reimbursement_line = _extract_reimbursement(lines)
-    organizer_line = _find_line(lines, ["主办单位", "组织单位", "项目方", "发起单位"])
-    organizer = re.sub(r"^.*?[：:]", "", organizer_line).strip() if organizer_line else ""
+    organizer_line = _find_line(lines, ORGANIZER_KEYWORDS)
+    organizer = _clip_to_keyword_sentence(organizer_line, ORGANIZER_KEYWORDS, limit=MAX_ORGANIZER)
     signup_method = _extract_signup_method(cleaned, lines)
 
     uncertain_fields: list[str] = []

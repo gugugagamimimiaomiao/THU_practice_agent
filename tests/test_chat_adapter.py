@@ -159,13 +159,21 @@ class ChatIntentTests(unittest.TestCase):
         """
         result = self.reply("我大三，八月有空，推荐实践")
         self.assertEqual(result.intent, "recommend")
-        tail = result.content[-220:]
+
+        # 取「接下来可以说」那一段，而不是末尾固定长度的字符窗口。
+        # 原来截 content[-220:]，而回复长度会随当天日期变化（演示数据的日期
+        # 跟着当天平移，进推荐的条数就跟着变），窗口会滑进项目列表，测试
+        # 于是在某些日期无缘无故地失败——测的也不是它想测的东西。
+        hints = [block for block in result.content.split("\n\n") if "接下来可以说" in block]
+        self.assertTrue(hints, f"回复里找不到引导语：{result.content[-300:]}")
+        hint = hints[-1]
+
         titles = [p["title"] for p in self.adapter.db.list_projects()]
         self.assertFalse(
-            any(title in tail for title in titles),
-            f"引导语里塞了完整项目标题，用户打不出来：{tail}",
+            any(title in hint for title in titles),
+            f"引导语里塞了完整项目标题，用户打不出来：{hint}",
         )
-        self.assertIn("第一个", tail)
+        self.assertIn("第一个", hint)
 
     def test_partial_title_finds_the_project(self):
         """真实标题三四十字，学生只会说其中几个字。
