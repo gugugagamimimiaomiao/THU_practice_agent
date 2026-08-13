@@ -772,6 +772,10 @@ def recommend_projects(projects: list[dict[str, Any]], profile: dict[str, Any], 
     potential: list[dict[str, Any]] = []
     excluded: list[dict[str, Any]] = []
     for project in projects:
+        # rejected 是人工判定过"这条不该出现"。以前它会落进 else 分支，
+        # 于是作为「潜在机会」照样露出来——等于驳回不生效。
+        if project.get("status") == "rejected":
+            continue
         result = score_project(project, profile, today=today)
         item = result.to_dict()
         if result.excluded_reasons:

@@ -21,6 +21,7 @@ from typing import Any, Callable, Iterable
 import llm
 from database import Database
 from domain import (
+    FIELD_LABELS,
     GRADE_TERMS,
     KNOWN_DEPARTMENTS,
     KNOWN_LOCATIONS,
@@ -362,6 +363,15 @@ LIST_WORDS = (
     "快截止", "最近截止", "都有什么",
 )
 
+# 「有没有校内的志愿服务」——问的是"符合这个条件的还有吗"，是筛选。
+# 实测它以前掉进了项目详情：标题里带"志愿服务"的项目被模糊匹配上，
+# 于是返回了一个**已经过期**的推普项目的详情页，答非所问还给了过期信息。
+FILTER_WORDS = (
+    "有没有", "有吗", "有嘛", "还有没有", "有木有",
+    "只看", "只要", "不要", "除了",
+    "校内", "本地", "线上", "线下", "同城",
+)
+
 
 _CN_MONTHS = {
     "一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6,
@@ -471,6 +481,11 @@ class PracticeChatAdapter:
         if any(word in latest for word in ["比较", "对比", "哪个好", "区别", "选哪个"]):
             return self._compare(messages, all_user_text)
         if any(word in latest for word in RECOMMEND_WORDS):
+            return self._recommend(all_user_text)
+        # 条件筛选：「有没有校内的志愿服务」「只看志愿服务」。必须排在项目匹配
+        # 之前——否则句子里的"志愿服务"会模糊命中某个标题，变成查那一个项目。
+        # 但用户完整点名某个项目时（「宝庆微光有吗」）仍然按查详情处理。
+        if any(word in latest for word in FILTER_WORDS) and not self._mentions_project_exactly(latest):
             return self._recommend(all_user_text)
         project = self._resolve_project(messages, latest)
         if project and any(word in latest for word in DETAIL_WORDS):
@@ -644,14 +659,7 @@ class PracticeChatAdapter:
                 "或者说「还有哪些实践机会」看全部在招项目。"
             )
         for index, item in enumerate(result["eligible"][:5], 1):
-            project = item["project"]
-            reasons = "；".join(item["reasons"][:3]) or "信息完整度较高"
-            lines.extend([
-                f"{index}. **{project['title']}**（匹配度 {round(item['score'])}）",
-                f"   - 截止：{project.get('signup_deadline') or '待确认'}；地点：{project.get('location', {}).get('detail') or '待确认'}",
-                f"   - 理由：{reasons}",
-                f"   - 项目 ID：`{project['id']}`",
-            ])
+            lines.extend(self._recommendation_card(index, item))
         if result["potential"]:
             lines.append("\n## 潜在机会（需先复核）")
             for item in result["potential"][:3]:
@@ -1047,6 +1055,45 @@ class PracticeChatAdapter:
             "比较两个项目、为指定项目生成报名理由和外联访谈材料、把招募通知转成项目卡。\n\n"
             "先说说你的院系、年级和大概什么时候有空？"
         )
+
+    @staticmethod
+    def _recommendation_card(index: int, item: dict[str, Any]) -> list[str]:
+        """推荐列表里的一条。
+
+        原来固定输出「截止：X；地点：Y」，抽不到就写"待确认"。真实数据上线后
+        实测一条推荐里能出现十几个"待确认"——因为很多通知本来就没写报名截止和
+        地点。满屏"待确认"有两个坏处：看起来像系统没做好（其实是原文没写），
+        而且把真正有用的信息淹了。
+
+        改成只列**抽到了的**字段；确实没有的不占位，改在末尾统一说明缺什么、
+        并把原文链接给出去——学生自己点进去看比我们反复说"待确认"有用。
+        """
+        project = item["project"]
+        facts: list[str] = []
+        if project.get("signup_deadline"):
+            facts.append(f"截止 {project['signup_deadline']}")
+        if project.get("practice_start"):
+            span = project["practice_start"]
+            if project.get("practice_end") and project["practice_end"] != span:
+                span += f"~{project['practice_end']}"
+            facts.append(f"时间 {span}")
+        detail = (project.get("location") or {}).get("detail") or (project.get("location") or {}).get("province")
+        if detail:
+            facts.append(f"地点 {detail}")
+        if (project.get("reimbursement") or {}).get("has_reimbursement"):
+            facts.append("有经费支持")
+
+        lines = [f"{index}. **{project['title']}**（匹配度 {round(item['score'])}）"]
+        if facts:
+            lines.append(f"   - {'；'.join(facts)}")
+        missing = [FIELD_LABELS.get(name, name) for name in project.get("uncertain_fields", [])
+                   if name != "source_url"]
+        if missing:
+            lines.append(f"   - 原文未写明：{'、'.join(missing[:4])}——以原文为准")
+        if project.get("source_url"):
+            lines.append(f"   - 原文：{project['source_url']}")
+        lines.append(f"   - 理由：{'；'.join(item['reasons'][:2]) or '信息完整度较高'}")
+        return lines
 
     def _writing_help(self, latest: str) -> ChatResult:
         """写作类请求，但没有绑定具体项目。

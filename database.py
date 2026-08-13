@@ -36,6 +36,25 @@ _SEED_DATE_RE = re.compile(
 _SEED_DATE_SKIP_KEYS = frozenset({"id", "source_url"})
 
 
+def show_demo_projects() -> bool:
+    """演示项目是否参与展示。
+
+    数据一行不动，只在读取层过滤——想放回来翻个环境变量即可，不用改库、
+    也不用重新导入。这比删行安全：删了就回不去了。
+
+    生产模式默认隐藏。真实数据进来之后，演示项目会和真项目混在同一份推荐里，
+    而它们恰好字段最齐、评分最高，实测能把真实项目全挤到后面去。评委问一句
+    「这个项目在哪报名」就穿帮了。
+    开发和测试环境默认显示，这样空库也能看到完整流程。
+    """
+    raw = os.getenv("SHOW_DEMO_DATA", "").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return os.getenv("PRACTICE_XIAODA_ENV", "development").strip().lower() != "production"
+
+
 def _shift_seed_dates(value: Any, delta: timedelta, *, key: str | None = None) -> Any:
     """把演示数据里所有日期整体平移 delta 天，保持字段之间的先后关系不变。
 
@@ -271,6 +290,10 @@ class Database:
             self.log("project_removed", f"已移出非招募内容：{row['title']}", {"project_id": row["id"], "reason": note})
         return len(rows)
 
+    @staticmethod
+    def _demo_visibility_note() -> str:
+        return "生产模式默认隐藏演示项目；SHOW_DEMO_DATA=true 可临时放出来。"
+
     def list_projects(self, *, status: str = "", query: str = "", include_expired: bool = True) -> list[dict[str, Any]]:
         clauses, params = [], []
         if status:
@@ -289,8 +312,11 @@ class Database:
         with self.connect() as db:
             rows = db.execute(sql, params).fetchall()
         projects = []
+        hide_demo = not show_demo_projects()
         for row in rows:
             project = refresh_status(json.loads(row["document"]))
+            if hide_demo and project.get("demo_data"):
+                continue
             projects.append(project)
         return projects
 

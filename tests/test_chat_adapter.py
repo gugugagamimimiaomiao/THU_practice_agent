@@ -342,8 +342,11 @@ class IntentSafetyTests(unittest.TestCase):
             chat_adapter.llm.classify_intent = original
 
     def test_model_fallback_routes_long_tail_wording(self):
-        # 词表接不住的说法：不含推荐/找项目/有空等任何关键词。
-        phrase = "有没有那种能去山里待一阵子的机会"
+        # 词表接不住的说法：不含推荐/找项目/有空/有没有等任何关键词。
+        # 原来用的例句是「有没有那种能去山里待一阵子的机会」，后来"有没有"
+        # 被加进条件筛选词表（真实测试里「有没有校内的志愿服务」曾掉进项目
+        # 详情），这句于是直接被规则接住了——是好事，但它不再能测模型兜底。
+        phrase = "闲着也是闲着，想见识见识外面的世界"
         self.assertEqual(self.reply(phrase).intent, "fallback")  # 关掉模型时确实掉兜底
 
         chat_adapter.llm.is_enabled = lambda: True
@@ -353,6 +356,38 @@ class IntentSafetyTests(unittest.TestCase):
             self.assertEqual(self.reply(phrase).intent, "recommend")
         finally:
             chat_adapter.llm.classify_intent = original
+
+
+class FilterQueryTests(unittest.TestCase):
+    """「有没有…的」是筛选，不是查某一个项目。
+
+    96 轮黑箱测试里实测出来的：问「有没有校内的志愿服务」，系统把句子里的
+    「志愿服务」模糊匹配到了某个标题，返回了那个**已经过期**的项目的详情页——
+    答非所问，还端出了过期信息。
+    """
+
+    def setUp(self):
+        chat_adapter.llm.is_enabled = lambda: False
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.adapter = PracticeChatAdapter(Database(Path(self.tempdir.name) / "chat.db"))
+
+    def reply(self, text: str):
+        return self.adapter.reply([{"role": "user", "content": text}])
+
+    def test_condition_questions_go_to_filtering(self):
+        # recommend_corrected 也算筛选：「不要实践支队」先命中纠正意图，
+        # 走的是"按最新说法重筛"那条路，结果一样是一份筛过的清单。
+        for phrase in ["有没有校内的志愿服务", "只看志愿服务，不要实践支队",
+                       "有线上就能参加的吗", "有没有不限院系的"]:
+            with self.subTest(phrase=phrase):
+                self.assertIn(self.reply(phrase).intent, {"recommend", "recommend_corrected"})
+
+    def test_naming_a_project_still_opens_that_project(self):
+        # 「宝庆微光有吗」里也有"有吗"，但用户点名了具体项目，该给详情。
+        title = self.adapter.db.list_projects()[0]["title"]
+        result = self.reply(f"{title}有吗")
+        self.assertEqual(result.intent, "project_detail")
 
 
 class MonthSpanTests(unittest.TestCase):
