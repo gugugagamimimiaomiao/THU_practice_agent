@@ -16,6 +16,8 @@ class WeweCollectorTests(unittest.TestCase):
 
     def test_candidate_title_gate(self):
         self.assertTrue(MODULE.likely_candidate("实践招募｜支队队员报名"))
+        self.assertTrue(MODULE.likely_candidate("社区志愿招募通知"))
+        self.assertTrue(MODULE.likely_candidate("志愿服务报名"))
         self.assertFalse(MODULE.likely_candidate("实践总结｜支队纪实"))
 
     def test_iso_date(self):

@@ -33,29 +33,33 @@
       "name": "无限之声",
       "article_url": "https://mp.weixin.qq.com/s/XxlyFmZ4voFiwp0VI8rzGQ",
       "feed_id": "MP_WXS_3092096216",
-      "status": "queued_for_subscription",
-      "verified_at": "2026-08-12"
+      "status": "subscribed",
+      "verified_at": "2026-08-12",
+      "activated_at": "2026-08-12"
     },
     {
       "name": "清华紫荆之声",
       "article_url": "https://mp.weixin.qq.com/s/6bSqtfHT9BVPGPNrNKgQug",
       "feed_id": "MP_WXS_3252748391",
-      "status": "queued_for_subscription",
-      "verified_at": "2026-08-12"
+      "status": "subscribed",
+      "verified_at": "2026-08-12",
+      "activated_at": "2026-08-12"
     },
     {
       "name": "清华大学学生会",
       "article_url": "https://mp.weixin.qq.com/s/QxWdLj3obuyJ4xqV5R4zJg",
       "feed_id": "MP_WXS_3531191868",
-      "status": "queued_for_subscription",
-      "verified_at": "2026-08-12"
+      "status": "subscribed",
+      "verified_at": "2026-08-12",
+      "activated_at": "2026-08-12"
     },
     {
       "name": "清华大学学生社团",
       "article_url": "https://mp.weixin.qq.com/s/FBc6v7ovTBrIpz6wwCgw5A",
       "feed_id": "MP_WXS_2398854781",
-      "status": "queued_for_subscription",
-      "verified_at": "2026-08-12"
+      "status": "subscribed",
+      "verified_at": "2026-08-12",
+      "activated_at": "2026-08-12"
     }
   ],
   "pending_canonical_url": [
