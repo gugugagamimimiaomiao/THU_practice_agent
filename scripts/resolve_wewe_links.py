@@ -17,7 +17,8 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
-DEFAULT_DB = Path("/private/tmp/wewe-rss-eval/apps/server/data/wewe-rss.db")
+ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_DB = Path(os.getenv("WEWE_DB_PATH", str(ROOT / "data" / "wewe-rss.db")))
 DEFAULT_RELAY = "https://weread.111965.xyz"
 DEFAULT_CA_BUNDLE = Path(
     "/Users/sonnette/.codex/venvs/social-practice-wechat-digest/lib/python3.8/site-packages/certifi/cacert.pem"

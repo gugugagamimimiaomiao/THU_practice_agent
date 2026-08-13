@@ -8,6 +8,7 @@ normal low-frequency scheduler.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import time
 from pathlib import Path
@@ -15,7 +16,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 QUEUE = ROOT / "config" / "wewe-subscriptions.json"
-WEWE_DB = Path("/private/tmp/wewe-rss-eval/apps/server/data/wewe-rss.db")
+WEWE_DB = Path(os.getenv("WEWE_DB_PATH", str(ROOT / "data" / "wewe-rss.db")))
 
 
 def main() -> int:

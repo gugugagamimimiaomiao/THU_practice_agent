@@ -66,3 +66,14 @@ https://mp.weixin.qq.com/s/<article-id>
 正文不足 200 字时不丢弃。只要正文或原文配图存在，就保留 `images` URL 供服务器 OCR。普通重复推送按 `source_url` 安全合并；确定是延期、资格放宽或抓漏正文时，导出使用 `--correction`，让每条 JSONL 带 `"correction": true`。
 
 微信读书账号 `status=0` 时立即停止刷新，不重试、不轮换账号/IP/设备。重新扫码并确认 `status=1` 后，仍应先对单个优先 Feed 做一页验证；如果状态再次回到 `0`，当天停止上游刷新。已缓存文章和已入库机会不受影响。
+
+## 本机持久化恢复
+
+本机非 Docker 验证统一使用项目内的 `data/wewe-rss.db`，该路径已被 `.gitignore` 排除且文件权限应为 `0600`。不要再把 `/private/tmp/.../wewe-rss.db` 当作运行库。启动与备份：
+
+```bash
+./scripts/start_local_wewe.sh
+./scripts/backup_wewe_data.sh
+```
+
+`scripts/resolve_wewe_links.py`、`scripts/wewe_sync_feed_page.py` 和 `scripts/activate_next_wewe_subscription.py` 默认读取同一个持久化文件，也可通过 `WEWE_DB_PATH` 显式覆盖。原临时库在完成迁移核验前保留为只读回滚副本；确认生产命名卷和本地备份都可恢复后再人工清理。
