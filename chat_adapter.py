@@ -15,6 +15,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
+from collections import Counter
 from datetime import date
 from typing import Any, Callable, Iterable
 
@@ -332,10 +333,32 @@ WRITING_HELP_WORDS = (
 # 光放在处理函数里不够——「招募推送文案有什么套路」会先被"推送"抢去写成稿。
 GENERIC_WRITING_HINTS = (
     "一般怎么写", "怎么写", "如何写", "写作技巧", "有什么套路", "套路是什么",
+    "写法", "文风", "语气",
+    # 起名、想标题这类创作请求，同样不需要先绑定项目——用户往往还没立项。
+    "起个名", "起名", "取名", "想几个名", "支队名", "队名",
     "格式是什么", "结构是什么", "要写哪些", "包含哪些", "分几部分",
     "范文", "模板", "示例", "有没有例子", "怎么下笔", "开头怎么", "结尾怎么",
     "注意什么", "注意哪些", "有什么讲究",
 )
+
+# 对已采集数据的统计性提问。这类有据可查——答案是从库里算出来的，不是编的。
+# 以前全都掉别处了：「哪些主题的实践比较多」被"比较"抢去做项目对比，
+# 「实践招募一般什么时候发布」里的"实践招募"模糊命中标题变成了项目候选列表。
+CORPUS_STATS_HINTS = (
+    "一般去", "都去哪", "去哪些地方", "哪些地方", "地点分布",
+    "一般多长", "多长时间", "一般几天", "持续多久",
+    "一般什么时候", "什么时候发布", "什么时候多", "集中在什么时候",
+    "哪些主题", "主题分布", "什么主题", "哪类多", "哪些类型",
+    "收录了多少", "有多少篇", "数据量", "样本量", "语料",
+)
+
+# 「比较」当副词用时不是要对比项目：「比较多」「比较难」「比较早」。
+# 「哪些主题的实践比较多」实测被这个词抢走，变成了两个项目的对比表格。
+_COMPARE_RE = re.compile(r"比较(?![多少好难易大小早晚快慢久短高低远近贵便])|对比|哪个好|区别|选哪个")
+
+# 起名/拟标题。用正则而不是硬列词组：「帮我想个推送标题」里"想"和"标题"之间
+# 隔着"个推送"，靠穷举字符串永远补不全。
+_NAMING_RE = re.compile(r"(想|起|取|拟|来)[几个一二三四五六七八九十\s]*(个|些)?[^，。？！]{0,6}(名字|名称|标题|队名)")
 
 # 关于社会实践本身的常识性提问，不是在找项目。
 ABOUT_PRACTICE_WORDS = (
@@ -462,10 +485,19 @@ class PracticeChatAdapter:
         # 注意这里要用"精确点名"而不是模糊匹配：说「帮我写一个乡村教育的调研提纲」时，
         # 「乡村教育」会模糊命中「滇西乡村教育数字化调研」，于是被当成给那个项目写材料。
         # 只有用户完整说出项目名或 ID，才认为这次写作请求是绑定到项目的。
+        # 贴一段文字要求润色/点评。必须排在最前面：这类消息往往很长，里面随便
+        # 一个词都可能模糊命中某个项目标题——实测「你看看我这个开头写得怎么样：
+        # 盛夏的七月，我们踏上了前往西部的列车」被匹配成了某个项目的详情页。
+        if self._is_polish_request(latest):
+            return self._polish_text(latest)
+        # 对已采集数据的统计性提问。同样要排在项目匹配之前——「实践招募一般
+        # 什么时候发布」里的"实践招募"会模糊命中一堆标题，变成项目候选列表。
+        if any(word in latest for word in CORPUS_STATS_HINTS) and not self._mentions_project_exactly(latest):
+            return self._corpus_stats(latest)
         # 「招募推送一般怎么写」问的是写法，不是要给某个项目出成稿。这类必须在
         # POST_WORDS / GENERATE_WORDS 之前拦下——否则"推送""帮我写"会先把它抢走。
-        if any(word in latest for word in WRITING_HELP_WORDS + GENERIC_WRITING_HINTS) \
-                and not self._mentions_project_exactly(latest):
+        if (any(word in latest for word in WRITING_HELP_WORDS + GENERIC_WRITING_HINTS)
+                or _NAMING_RE.search(latest)) and not self._mentions_project_exactly(latest):
             return self._writing_help(latest)
         if any(word in latest for word in NEGATION_WORDS):
             return self._handle_correction(messages, all_user_text, latest)
@@ -478,7 +510,7 @@ class PracticeChatAdapter:
             return self._draft_post(messages, all_user_text, latest)
         if any(word in latest for word in GENERATE_WORDS):
             return self._generate(messages, all_user_text, latest)
-        if any(word in latest for word in ["比较", "对比", "哪个好", "区别", "选哪个"]):
+        if _COMPARE_RE.search(latest):
             return self._compare(messages, all_user_text)
         if any(word in latest for word in RECOMMEND_WORDS):
             return self._recommend(all_user_text)
@@ -1095,6 +1127,192 @@ class PracticeChatAdapter:
         lines.append(f"   - 理由：{'；'.join(item['reasons'][:2]) or '信息完整度较高'}")
         return lines
 
+    # 贴一段文字要求处理。冒号后跟一整段，或者整条消息就是一大段文稿。
+    POLISH_WORDS = (
+        "润色", "改改", "改一下", "修改一下", "帮我改", "改得", "优化一下",
+        "通顺吗", "怎么样", "点评", "看看这段", "帮我看看", "有什么问题",
+        "读起来", "打磨", "精简", "扩写",
+    )
+    # 低于这个长度的多半不是待处理文稿，而是一句提问。
+    # 原来设的 25 字太高：「你看看我这个开头写得怎么样：盛夏的七月，我们踏上了
+    # 前往西部的列车。」冒号后只有 20 字，于是不触发，整句被模糊匹配成了某个
+    # 项目的详情页。一个开头句本来就短，判据该是"有没有实质内容"而不是"够不够长"。
+    MIN_POLISH_TEXT = 12
+
+    @staticmethod
+    def _extract_pasted_text(latest: str) -> str:
+        """从「帮我润色这段：……」里把要处理的正文抠出来。
+
+        用户贴文时的写法很随意：有冒号的、有换行的、也有直接一整段甩过来的。
+        取冒号或换行之后的部分；都没有就看整条消息够不够长。
+        """
+        for separator in ("：", ":", "\n"):
+            head, sep, tail = latest.partition(separator)
+            if sep and len(tail.strip()) >= PracticeChatAdapter.MIN_POLISH_TEXT:
+                return tail.strip()
+        stripped = latest.strip()
+        return stripped if len(stripped) >= 60 else ""
+
+    def _is_polish_request(self, latest: str) -> bool:
+        if not any(word in latest for word in self.POLISH_WORDS):
+            return False
+        return bool(self._extract_pasted_text(latest))
+
+    def _polish_text(self, latest: str) -> ChatResult:
+        """润色或点评用户贴过来的文稿。
+
+        这是写作辅助最基本的用法，以前完全接不住：贴一段要求润色，系统回
+        「我得先知道是给哪个项目写」；更糟的一次是把「盛夏的七月，我们踏上了
+        前往西部的列车」模糊匹配到某个项目，端出了那个项目的详情页。
+
+        改写只动表达，不动事实——用户没写的信息不会替他补上。这跟整个项目的
+        承诺是同一条：语料只提供文风参照，不提供内容。
+        """
+        draft = self._extract_pasted_text(latest)
+        corpus = self._corpus()
+        genre = next((name for words, name in self._GENRE_FOR_QUESTION
+                      if any(word in latest or word in draft[:60] for word in words)), "")
+        samples = corpus.search(draft[:200], genre=genre, limit=2) or corpus.search(draft[:200], limit=2)
+
+        if not llm.is_enabled():
+            return ChatResult(
+                "当前没有配置写作模型，我给不了改写稿。能帮你看的是结构——"
+                "招募类推送一般是「背景与意义 → 做什么去哪多久 → 谁能报怎么报截止什么时候 "
+                "→ 保障与收获 → 号召和联系方式」这五段，对照着看看你这段落在哪一环、缺了哪一环。\n\n"
+                + (f"库里有 {len(samples)} 篇同类真实推文可以参照："
+                   + "、".join(s.title[:26] for s in samples) if samples else ""),
+                "polish_degraded",
+            )
+
+        from corpus import build_reference_block
+        reference = build_reference_block(samples)
+        system_prompt = (
+            "你在帮清华学生改一段社会实践或志愿服务相关的文稿。\n\n"
+            "**只动表达，不动事实**：用户没写的时间、地点、人数、联系方式、报销标准，"
+            "一个字都不要替他补。参考推文只用来学语气和节奏，里面的具体信息属于别的项目。\n"
+            "如果你觉得原文缺了关键信息（比如没写报名截止），在改写稿之后单独提一句提醒他补，"
+            "不要直接编一个填进去。\n\n"
+            "输出两部分：先给改写稿，再用三到五条说明改了什么、为什么。用中文。"
+        )
+        try:
+            body = llm.complete(system_prompt, f"用户的要求：{latest[:120]}\n\n原文：\n{draft}\n\n{reference}")
+        except llm.LLMUnavailable:
+            return ChatResult("写作模型暂时不可用，稍后再试；或者把要求说得更具体些，我先给你列结构。", "polish_degraded")
+        if not body.strip():
+            return ChatResult("这段我没能给出更好的版本，换个说法再试一次？", "polish_degraded")
+
+        tail = ""
+        if samples:
+            tail = ("\n\n---\n\n参照了库里这几篇真实推文的写法："
+                    + "、".join(f"《{s.title[:26]}》" for s in samples)
+                    + "。里面的日期地点属于那些项目本身，没有被写进你的稿子。")
+        return ChatResult(body.strip() + tail, "polish")
+
+    def _corpus_stats(self, latest: str) -> ChatResult:
+        """回答「实践一般去哪些地方」这类问题——从已采集的数据里算，不猜。
+
+        这是"用全部数据回答问题"最直接的一种用法：答案是统计出来的，每个数字
+        都能回查。但必须把话说准——我们收的是**已采集到的这些**公众号推送，
+        不等于清华所有实践。所以回答里一定带上样本量和来源，让人知道这句话
+        的适用范围。
+        """
+        projects = self._projects()
+        corpus = self._corpus()
+        lines: list[str] = []
+        accounts = sorted({p.get("source_account", "") for p in projects if p.get("source_account")})
+        scope = (f"下面的数字来自已采集的 {len(corpus)} 篇公众号推送和 {len(projects)} 条项目卡"
+                 + (f"（来源：{'、'.join(accounts[:4])}）" if accounts else "")
+                 + "。这是我们收到的样本，不代表清华全部实践。")
+
+        if any(word in latest for word in ("去哪", "地方", "地点", "地区")):
+            places = Counter()
+            for project in projects:
+                location = project.get("location") or {}
+                name = location.get("province") or location.get("detail")
+                if name:
+                    places[name[:12]] += 1
+            if places:
+                lines.append("**实践地点分布**（有写明地点的项目）\n")
+                for name, count in places.most_common(8):
+                    lines.append(f"- {name}：{count} 个")
+            else:
+                lines.append("已采集的项目里还没有写明地点的，暂时统计不出来。")
+
+        elif any(word in latest for word in ("多长", "几天", "多久", "持续")):
+            topic = next((word for word in ("支教", "调研", "志愿", "科普", "宣讲", "帮扶")
+                          if word in latest), "")
+            pool = [p for p in projects if not topic or topic in p.get("title", "")]
+            spans, suspicious = [], []
+            for project in pool:
+                start, end = project.get("practice_start"), project.get("practice_end")
+                if not (start and end):
+                    continue
+                try:
+                    days = (date.fromisoformat(end) - date.fromisoformat(start)).days + 1
+                except ValueError:
+                    continue
+                if days <= 0:
+                    continue
+                # 支队实践超过一个月的极少见。真实数据里见过一条"6月11日到8月6日"，
+                # 那其实是各楼栋分批检测的日期，被当成了实践起止——统计会把这种
+                # 抽错的值放大成一个看起来很确定的结论，所以单独拎出来说明。
+                (suspicious if days > 40 else spans).append((days, project["title"]))
+            scope_note = f"标题含「{topic}」的项目" if topic else "写明了起止日期的项目"
+            if spans:
+                spans.sort()
+                middle = spans[len(spans) // 2][0]
+                lines.append(f"**实践时长**（{len(spans)} 个{scope_note}）\n")
+                lines.append(f"- 中位数 {middle} 天，最短 {spans[0][0]} 天，最长 {spans[-1][0]} 天")
+                lines.append(f"- 最短《{spans[0][1][:26]}》，最长《{spans[-1][1][:26]}》")
+                if len(spans) < 5:
+                    lines.append(f"\n只有 {len(spans)} 个样本，这个数字参考价值有限。")
+            else:
+                lines.append(f"已采集的{scope_note}太少，算不出可靠的时长分布。"
+                             "很多招募通知只写主题不写具体日期。")
+            if suspicious:
+                lines.append(f"\n另有 {len(suspicious)} 条跨度超过 40 天，多半是把正文里几个"
+                             "分散的日期当成了起止（比如分批次的活动安排），没有计入上面的统计：")
+                for days, title in suspicious[:3]:
+                    lines.append(f"- 《{title[:30]}》标着 {days} 天")
+
+        elif any(word in latest for word in ("主题", "类型", "哪类")):
+            genres = corpus.genres()
+            lines.append("**已采集推文的体裁分布**\n")
+            for genre, count in sorted(genres.items(), key=lambda kv: -kv[1]):
+                lines.append(f"- {genre}：{count} 篇")
+            themes = Counter()
+            for project in projects:
+                for theme in project.get("themes", []):
+                    themes[theme] += 1
+            if themes:
+                lines.append("\n**项目主题分布**\n")
+                for theme, count in themes.most_common(8):
+                    lines.append(f"- {theme}：{count} 个")
+
+        elif any(word in latest for word in ("什么时候", "发布", "集中")):
+            months = Counter()
+            for project in projects:
+                deadline = project.get("signup_deadline") or project.get("practice_start")
+                if deadline and len(deadline) >= 7:
+                    months[deadline[:7]] += 1
+            if months:
+                lines.append("**报名截止或实践开始的月份分布**\n")
+                for month, count in sorted(months.items()):
+                    lines.append(f"- {month}：{count} 个")
+                lines.append("\n经验上暑期实践的招募集中在 5–6 月，秋季学期的组织招新集中在 9 月开学季——"
+                             "但这句是常识，不是从上面这些数字里得出的，我把两者分开说。")
+            else:
+                lines.append("已采集的项目里带日期的还太少，算不出发布时间的分布。")
+
+        else:
+            lines.append(f"**已采集的数据规模**\n")
+            lines.append(f"- 可作写作范例的真实推文：{len(corpus)} 篇")
+            for genre, count in sorted(corpus.genres().items(), key=lambda kv: -kv[1]):
+                lines.append(f"  - {genre}：{count} 篇")
+            lines.append(f"- 项目卡：{len(projects)} 条")
+
+        return ChatResult("\n".join(lines) + f"\n\n---\n\n{scope}", "corpus_stats")
+
     def _writing_help(self, latest: str) -> ChatResult:
         """写作类请求，但没有绑定具体项目。
 
@@ -1110,7 +1328,7 @@ class PracticeChatAdapter:
         两者的边界必须说清楚：范例只提供写法，其中的日期地点联系方式属于别的
         项目，写进用户的材料就是编造。
         """
-        if any(hint in latest for hint in GENERIC_WRITING_HINTS):
+        if any(hint in latest for hint in GENERIC_WRITING_HINTS) or _NAMING_RE.search(latest):
             return ChatResult(self._generic_writing_answer(latest), "writing_guide")
         return ChatResult(
             "你是想让我帮着写点东西——但我得先知道是给**哪个项目**写，"
@@ -1154,16 +1372,30 @@ class PracticeChatAdapter:
             f"- {s.title}（{s.account or '来源未标注'}·{s.genre}）" for s in samples)
 
         if llm.is_enabled():
-            system_prompt = (
-                "你是清华大学社会实践与志愿服务的写作指导。用户问的是"
-                "「这类材料一般怎么写」，要的是方法和结构，不是某个具体项目的成稿。\n\n"
-                "请给出：写之前要想清楚的问题、推荐的结构（分段列出每段写什么）、"
-                "这类文体的语气特点、常见的问题。\n\n"
-                "**硬性要求**：参考推文只用来学写法。绝不要引用其中的具体日期、"
-                "地点、人名、联系方式、报销金额、名额——那些是别的项目的事实。"
-                "需要举例时用「某地」「X月X日」这样的占位写法。\n"
-                "用中文，控制在 700 字以内，不要写成论文。"
-            )
+            naming = bool(_NAMING_RE.search(question)) or any(
+                word in question for word in ("起名", "取名", "队名", "支队名"))
+            if naming:
+                # 起名和讲写法是两回事。用同一套"请给出结构和方法"的提示词，
+                # 用户要几个名字，拿到的会是一篇命名方法论。
+                system_prompt = (
+                    "你在帮清华学生给社会实践支队或志愿项目起名字。\n\n"
+                    "直接给 6~8 个候选，每个后面用一句话说明取意。清华支队名的惯例是"
+                    "四到六字、常嵌地名或主题、多用对仗或双关（参考推文里能看到这种风格）。\n\n"
+                    "**硬性要求**：不要照搬参考推文里已有的支队名——那是别人的项目。"
+                    "用户没说主题或地点时，先问一句他想去哪、做什么，再给名字。\n"
+                    "用中文，简洁，不要长篇大论。"
+                )
+            else:
+                system_prompt = (
+                    "你是清华大学社会实践与志愿服务的写作指导。用户问的是"
+                    "「这类材料一般怎么写」，要的是方法和结构，不是某个具体项目的成稿。\n\n"
+                    "请给出：写之前要想清楚的问题、推荐的结构（分段列出每段写什么）、"
+                    "这类文体的语气特点、常见的问题。\n\n"
+                    "**硬性要求**：参考推文只用来学写法。绝不要引用其中的具体日期、"
+                    "地点、人名、联系方式、报销金额、名额——那些是别的项目的事实。"
+                    "需要举例时用「某地」「X月X日」这样的占位写法。\n"
+                    "用中文，控制在 700 字以内，不要写成论文。"
+                )
             try:
                 body = llm.complete(system_prompt, f"用户的问题：{question}\n\n{reference}")
                 if body.strip():
