@@ -104,6 +104,54 @@ class ExportIngestBatchTests(unittest.TestCase):
         self.assertFalse(wewe_export_handoff.is_current_opportunity(expired))
         self.assertFalse(wewe_export_handoff.is_current_opportunity(demo))
 
+    def test_since_and_prior_handoffs_produce_a_true_increment(self):
+        today = date.today()
+        old = (today - timedelta(days=30)).isoformat()
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            database = root / "projects.db"
+            output = root / "batch.jsonl"
+            prior_json = root / "prior.json"
+            prior_jsonl = root / "prior.jsonl"
+            connection = sqlite3.connect(database)
+            connection.executescript(
+                """
+                CREATE TABLE articles (id INTEGER PRIMARY KEY, raw_text TEXT NOT NULL);
+                CREATE TABLE projects (
+                    id TEXT PRIMARY KEY, status TEXT NOT NULL, signup_deadline TEXT,
+                    source_url TEXT, document TEXT NOT NULL
+                );
+                """
+            )
+            for identifier, published in ((1, today.isoformat()), (2, today.isoformat()), (3, old)):
+                url = f"https://mp.weixin.qq.com/s/item-{identifier}"
+                document = {
+                    "article_id": identifier, "demo_data": False, "source_account": "可信公众号",
+                    "source_url": url, "title": f"机会 {identifier}", "publish_date": published,
+                    "practice_end": "",
+                }
+                connection.execute("INSERT INTO articles VALUES (?, ?)", (identifier, "真实招募正文" * 30))
+                connection.execute(
+                    "INSERT INTO projects VALUES (?, 'published', '', ?, ?)",
+                    (str(identifier), url, json.dumps(document, ensure_ascii=False)),
+                )
+            connection.commit()
+            connection.close()
+            prior_json.write_text(
+                json.dumps({"source_url": "https://mp.weixin.qq.com/s/item-1"}, indent=2)
+                + "\n"
+                + json.dumps({"source_url": "https://mp.weixin.qq.com/s/also-unrelated"}, indent=2),
+                encoding="utf-8",
+            )
+            prior_jsonl.write_text('{"source_url":"https://mp.weixin.qq.com/s/unrelated"}\n', encoding="utf-8")
+
+            excluded = export_ingest_batch.excluded_source_urls([prior_json, prior_jsonl])
+            records = export_ingest_batch.export(
+                database, output, 20, since=today.isoformat(), excluded_urls=excluded
+            )
+
+        self.assertEqual([record["title"] for record in records], ["机会 2"])
+
 
 if __name__ == "__main__":
     unittest.main()
