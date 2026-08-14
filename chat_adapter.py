@@ -1049,6 +1049,43 @@ class PracticeChatAdapter:
         ]
         return "\n".join(lines)
 
+    # 招募推送里常见的"参加能得到什么"。用于回答保研/学分类问题时，
+    # 补一句有据可查的事实——而不是只说"我不知道"。
+    _INCENTIVE_TERMS = (
+        ("志愿工时", ("志愿工时", "工时认证", "服务时长")),
+        ("实践证明或证书", ("实践证明", "结业证书", "荣誉证书", "证书")),
+        ("交通或食宿补贴", ("交通补贴", "报销", "食宿", "补贴")),
+        ("推荐信或评优机会", ("推荐信", "评优", "优秀个人", "表彰")),
+    )
+
+    def _incentive_evidence(self) -> str:
+        """从语料里数一数：招募推送到底承诺了什么。
+
+        「保研有没有用」这个问题的规则部分我们答不了，也不该猜。但"推送里
+        写了什么"是查得到的——把它摆出来，比只说一句"以院系文件为准"有用，
+        而且每个数字都能回查。
+
+        注意措辞：说的是"推送里提到"，不是"参加就能获得"，更不是"对保研有用"。
+        这三件事不一样。
+        """
+        corpus = self._corpus()
+        recruitment = [s for s in corpus.samples if s.genre == "招募推送"]
+        if not recruitment:
+            return ""
+        counts = []
+        for label, terms in self._INCENTIVE_TERMS:
+            hits = sum(1 for s in recruitment if any(term in s.text for term in terms))
+            if hits:
+                counts.append(f"{label} {hits} 篇")
+        if not counts:
+            return ""
+        return (
+            f"能查到的是这个：已采集的 {len(recruitment)} 篇招募推送里，"
+            f"提到{'、'.join(counts)}。\n"
+            "这只是**推送里写了什么**，不等于参加就一定拿得到，更不等于对保研有用——"
+            "具体以各项目的原文和你院系的认定口径为准。\n\n"
+        )
+
     def _about_practice(self, latest: str) -> str:
         """关于社会实践本身的常识提问——不是在找项目，别丢一页推荐给人家。"""
         base = (
@@ -1059,6 +1096,7 @@ class PracticeChatAdapter:
             return base + (
                 "社会实践和保研、综测的换算规则各院系不一样，而且逐年调整，"
                 "以你所在院系当年的文件和辅导员口径为准，别信二手转述。\n\n"
+                + self._incentive_evidence() +
                 "我能帮的是：按你的时间、地点、主题筛出还能报名的项目，"
                 "并给出每个字段的原文出处。要试试吗？"
             )
@@ -1509,21 +1547,36 @@ class PracticeChatAdapter:
 
     @classmethod
     def _project_detail(cls, project: dict[str, Any]) -> str:
+        # 抽到的字段照常列，没抽到的收到末尾统一说明。
+        #
+        # 原来每个字段都固定输出、缺就写"待确认"，真实数据上一屏能出现十几个。
+        # 两个坏处：看起来像系统没做好（其实是原文没写），以及把真正有内容的
+        # 那两三行淹了。「原文未写明」既说清了责任在原文，也顺带提示去看原文。
+        location = (project.get("location") or {}).get("detail")
+        eligibility = (project.get("eligibility") or {}).get("restriction_text")
+        reimbursement = (project.get("reimbursement") or {}).get("text")
+        rows = [
+            ("主办方", project.get("organizer")),
+            ("实践时间", f"{project['practice_start']} 至 {project['practice_end']}"
+                if project.get("practice_start") and project.get("practice_end")
+                else project.get("practice_start") or ""),
+            ("报名截止", project.get("signup_deadline")),
+            ("地点", location),
+            ("资格", eligibility),
+            ("经费", reimbursement),
+            ("报名方式", project.get("signup_method")),
+        ]
         lines = [
             f"## {project['title']}",
             "",
             project.get("summary") or "暂无摘要",
             "",
             f"- 状态：{project.get('status')}",
-            f"- 主办方：{project.get('organizer') or '待确认'}",
-            f"- 实践时间：{project.get('practice_start') or '待确认'} 至 {project.get('practice_end') or '待确认'}",
-            f"- 报名截止：{project.get('signup_deadline') or '待确认'}",
-            f"- 地点：{project.get('location', {}).get('detail') or '待确认'}",
-            f"- 资格：{project.get('eligibility', {}).get('restriction_text') or '待确认'}",
-            f"- 经费：{project.get('reimbursement', {}).get('text') or '待确认'}",
-            f"- 报名方式：{project.get('signup_method') or '待确认'}",
-            f"- 待确认字段：{cls._field_labels(project.get('uncertain_fields', [])) or '无'}",
         ]
+        lines.extend(f"- {label}：{value}" for label, value in rows if value)
+        blank = [label for label, value in rows if not value]
+        if blank:
+            lines.append(f"- 原文未写明：{'、'.join(blank)}——以原文通知为准")
 
         # 把原文引用摆到对话里。"关键字段可回查原文"是这个产品区别于
         # 让大模型直接读通知的地方，但此前只有网页端能看到证据，对话里看不见。
@@ -1567,7 +1620,16 @@ class PracticeChatAdapter:
             return "\n".join(lines)
         lines = ["当前可正式推荐的已核验项目："]
         for index, project in enumerate(projects[:8], 1):
-            lines.append(f"{index}. **{project['title']}**｜截止 {project.get('signup_deadline') or '待确认'}｜{project.get('location', {}).get('detail') or '地点待确认'}")
+            # 同推荐卡片：只列抽到的，缺的不占位。一行里挂两个"待确认"
+            # 既没信息量又显得系统没做好。
+            facts = []
+            if project.get("signup_deadline"):
+                facts.append(f"截止 {project['signup_deadline']}")
+            detail = (project.get("location") or {}).get("detail")
+            if detail:
+                facts.append(detail[:20])
+            suffix = f"｜{'｜'.join(facts)}" if facts else "｜关键信息以原文为准"
+            lines.append(f"{index}. **{project['title']}**{suffix}")
         if len(projects) > 8:
             lines.append(f"（共 {len(projects)} 条，只列出前 8 条）")
 

@@ -96,6 +96,49 @@ class WritingAssistRoutingTests(unittest.TestCase):
         self.assertIn(self.reply("帮我写报名理由").intent,
                       {"generate_needs_project", "writing_help"})
 
+    def test_incentive_question_cites_the_corpus_without_overclaiming(self):
+        """「保研有用吗」：规则部分不猜，但推送里写了什么可以查。
+
+        以前只有一句"以院系文件为准"。规则确实不该猜，但"已采集的招募推送里
+        有几篇提到志愿工时"是查得到的事实，摆出来比只说不知道有用。
+
+        措辞的边界必须守住：「推送里提到」≠「参加就能拿到」≠「对保研有用」。
+        """
+        answer = self.reply("参加社会实践对保研有用吗").content
+        self.assertIn("以你所在院系当年的文件", answer)
+        if "已采集的" in answer:  # 语料里有招募推送时才会给这段
+            self.assertIn("不等于参加就一定拿得到", answer)
+            self.assertIn("更不等于对保研有用", answer)
+
+
+class DisplayWordingTests(unittest.TestCase):
+    """缺字段时的措辞。取消人工核验后，缺字段的项目会直接展示给学生。"""
+
+    def setUp(self):
+        chat_adapter.llm.is_enabled = lambda: False
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.database = Database(Path(self.tempdir.name) / "chat.db")
+        self.adapter = PracticeChatAdapter(self.database)
+
+    def test_detail_page_does_not_repeat_placeholder_for_every_field(self):
+        """详情页原来每个缺失字段都写一行「待确认」，真实数据上一屏十几个。
+
+        两个坏处：看起来像系统没做好（其实是原文没写），以及把真正有内容的
+        那两三行淹了。
+        """
+        import_article_text(
+            self.database,
+            {"title": "某支队招募队员", "source_account": "清华大学社会实践",
+             "source_url": "https://mp.weixin.qq.com/s/sparse"},
+            "现面向全校招募队员，欢迎报名参加。具体安排详见后续通知，届时会在群内公布。",
+        )
+        project = [p for p in self.database.list_projects()
+                   if p["source_url"].endswith("sparse")][0]
+        detail = self.adapter._project_detail(self.database.get_project(project["id"]))
+        self.assertLessEqual(detail.count("待确认"), 1, f"「待确认」出现太多次：\n{detail}")
+        self.assertIn("原文未写明", detail)
+
 
 if __name__ == "__main__":
     unittest.main()
