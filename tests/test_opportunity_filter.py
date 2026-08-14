@@ -61,6 +61,16 @@ class OpportunityFilterTests(unittest.TestCase):
         })
         self.assertFalse(result["candidate"])
 
+    def test_future_steps_after_signup_closes_do_not_mean_signup_is_closed(self):
+        result = candidate_decision({
+            "title": "报名开启丨2026年紫荆杯暑期电竞大赛",
+            "content": (
+                "报名时间：即日起至7月23日。报名方式：填写报名问卷。"
+                "具体赛程将在报名结束后进行安排。"
+            ),
+        })
+        self.assertTrue(result["candidate"], result["reasons"])
+
 
 class RealDataRegressionTests(unittest.TestCase):
     """来自真实公众号数据的回归。标题和文风照抄线上样本，只改掉具体地名。

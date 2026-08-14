@@ -103,6 +103,18 @@ def already_imported(db_path: str) -> set[str]:
     return done
 
 
+def import_metadata(record: dict[str, Any]) -> dict[str, Any]:
+    """Build ingestion metadata without dropping optional image evidence."""
+    return {
+        "input_type": "collector_file",
+        "source_account": str(record["source_account"]).strip(),
+        "source_url": str(record["source_url"]).strip(),
+        "title": str(record["title"]).strip(),
+        "publish_date": str(record["publish_date"]).strip(),
+        "images": [str(url).strip() for url in record.get("images", []) if str(url).strip()],
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="导入采集器交付的文章正文")
     parser.add_argument("path", type=Path, help="JSONL 文件")
@@ -167,13 +179,7 @@ def main() -> int:
     rejected: list[tuple[str, str]] = []
 
     for position, (line_no, record) in enumerate(pending, 1):
-        metadata = {
-            "input_type": "collector_file",
-            "source_account": str(record["source_account"]).strip(),
-            "source_url": str(record["source_url"]).strip(),
-            "title": str(record["title"]).strip(),
-            "publish_date": str(record["publish_date"]).strip(),
-        }
+        metadata = import_metadata(record)
         try:
             result = import_article_text(
                 Database(), metadata, str(record["raw_text"]),

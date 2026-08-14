@@ -29,6 +29,26 @@ TITLE_EXCLUDE_WORDS = (
 TERMINAL_EXCLUDE_WORDS = ("招募结束", "报名结束")
 
 
+def _terminal_exclusions(title: str, body: str) -> list[str]:
+    """Return explicit closed-recruitment signals, ignoring future sequencing.
+
+    Notices often say ``赛程将在报名结束后安排`` while registration is still
+    open.  That phrase describes what happens later; it is not evidence that
+    signup has already closed.  A terminal phrase in the title remains an
+    unconditional exclusion, while the body form is ignored only when it is
+    immediately followed by ``后``.
+    """
+    hits: list[str] = []
+    for word in TERMINAL_EXCLUDE_WORDS:
+        if word in title:
+            hits.append(word)
+            continue
+        searchable_body = body.replace(f"{word}后", "")
+        if word in searchable_body:
+            hits.append(word)
+    return hits
+
+
 def candidate_decision(article: dict[str, Any], ocr_text: str = "") -> dict[str, Any]:
     """Decide whether an article can become a social-practice opportunity.
 
@@ -47,7 +67,7 @@ def candidate_decision(article: dict[str, Any], ocr_text: str = "") -> dict[str,
     # in its body.  Editorial/review labels are therefore title signals; only
     # an explicit closed-recruitment phrase may exclude from the full body.
     genre_excluded = [word for word in TITLE_EXCLUDE_WORDS if word in title]
-    terminal_excluded = [word for word in TERMINAL_EXCLUDE_WORDS if word in title or word in body]
+    terminal_excluded = _terminal_exclusions(title, body)
     excluded = genre_excluded + terminal_excluded
     score = (3 if title_hits else 0) + (2 if body_hits else 0) + (2 if action_hits else 0)
     if "招募" in body and any(char.isdigit() for char in body):

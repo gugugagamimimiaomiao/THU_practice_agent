@@ -179,10 +179,13 @@ def _evidence(line: str, input_type: str) -> dict[str, str] | None:
 DEADLINE_LABELS = (
     "报名截止", "截止日期", "截止时间", "报名截至", "截至日期", "截至时间",
     "申报截止", "报名截止至", "提交截止", "投递截止", "报名结束", "报名时间",
-    "前扫码报名", "前报名",
+    "征集截止", "报名ddl", "前扫码报名", "前报名",
 )
 # 宽松线索。只在没有明确标签、且同一行里真的有日期时才用。
 DEADLINE_HINTS = ("截止", "截至")
+DEADLINE_BEFORE_ACTIONS = (
+    "填写", "提交", "上传", "发送", "报送", "投递",
+)
 
 
 def _find_deadline(lines: list[str], today: date) -> tuple[str | None, str]:
@@ -202,7 +205,13 @@ def _find_deadline(lines: list[str], today: date) -> tuple[str | None, str]:
     """
     explicit: list[tuple[str, str]] = []
     for index, line in enumerate(lines):
-        if not any(label in line for label in DEADLINE_LABELS):
+        lower_line = line.lower()
+        has_label = any(label in lower_line for label in DEADLINE_LABELS)
+        # 真实通知常写成“请于7月9日中午12点前，填写在线问卷”，没有出现
+        # “截止”二字。日期、“前”和明确报名动作必须在同一行，避免把普通的
+        # “活动前填写反馈问卷”误当成报名截止。
+        has_before_action = "前" in line and any(action in line for action in DEADLINE_BEFORE_ACTIONS)
+        if not has_label and not has_before_action:
             continue
         parsed = parse_date_from_text(line, today.year)
         if parsed:

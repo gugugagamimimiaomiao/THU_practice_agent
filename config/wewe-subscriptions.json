@@ -154,6 +154,41 @@
       "feed_id": "MP_WXS_2397450622",
       "status": "queued_for_subscription",
       "verified_at": "2026-08-13"
+    },
+    {
+      "name": "软小宣",
+      "article_url": "https://mp.weixin.qq.com/s/meNmZ-cBfvQO9z23zRXNJA",
+      "feed_id": "MP_WXS_2394327705",
+      "status": "queued_for_subscription",
+      "verified_at": "2026-08-13"
+    },
+    {
+      "name": "清医色",
+      "article_url": "https://mp.weixin.qq.com/s/gFvs3pvJnBtOF3UROMXkGg",
+      "feed_id": "MP_WXS_3097179830",
+      "status": "queued_for_subscription",
+      "verified_at": "2026-08-13"
+    },
+    {
+      "name": "清华经管 家园",
+      "article_url": "https://mp.weixin.qq.com/s/sxbhap-tpikqZk5uEEx4Rw",
+      "feed_id": "MP_WXS_2394443125",
+      "status": "queued_for_subscription",
+      "verified_at": "2026-08-13"
+    },
+    {
+      "name": "知行乡随",
+      "article_url": "https://mp.weixin.qq.com/s/f-qvJim_JQ1vYVC1HUHSug",
+      "feed_id": "MP_WXS_3631432777",
+      "status": "queued_for_subscription",
+      "verified_at": "2026-08-13"
+    },
+    {
+      "name": "社氏有声",
+      "article_url": "https://mp.weixin.qq.com/s/ALm-o_y07wv2RKMrJqK0Pw",
+      "feed_id": "MP_WXS_3094827638",
+      "status": "queued_for_subscription",
+      "verified_at": "2026-08-13"
     }
   ],
   "pending_canonical_url": [
@@ -171,7 +206,6 @@
     "IE小研",
     "酒井资讯",
     "紫冬话语",
-    "软小宣",
     "芯系清华",
     "力小翼",
     "天工物华",
@@ -180,16 +214,13 @@
     "清化宣传",
     "清心地学",
     "茶园资讯",
-    "清华经管家园",
     "公管声音",
     "吾道清年",
     "Lawgic",
     "清马来了",
     "文心载道",
-    "社氏有声",
     "清美团宣",
     "核研人",
-    "清医色",
     "网研之家",
     "雅人新致",
     "THU求真寻理",
