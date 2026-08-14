@@ -97,8 +97,16 @@ def collect(hours: int) -> dict:
     }
 
     # ---- 导入 ----
+    # 两条链路的统计分开：机会链路进推荐、语料链路只服务写作。混在一起看
+    # 会得出"我们有几百篇文章"这种没意义的数字。
+    by_status = dict(_rows(con, "SELECT collector_status, COUNT(*) FROM articles GROUP BY collector_status"))
+    corpus_only = by_status.get("corpus_only", 0)
+    total_articles = sum(by_status.values())
     out["ingest"] = {
-        "articles_total": _rows(con, "SELECT COUNT(*) FROM articles")[0][0] if _rows(con, "SELECT COUNT(*) FROM articles") else 0,
+        "articles_total": total_articles,
+        "corpus_only": corpus_only,
+        "opportunity_track": total_articles - corpus_only,
+        "by_collector_status": sorted(by_status.items(), key=lambda kv: -kv[1])[:6],
         "recent_events": [
             {"type": t, "message": m[:60], "at": c}
             for t, m, c in _rows(
@@ -270,6 +278,12 @@ def render(d: dict) -> str:
     a(f"  {f['count']} 条" + (f"，平均 {f['avg_rating']} 分" if f["avg_rating"] else ""))
 
     ing = d["ingest"]
+    a("")
+    a("【已收录原文】两条链路分开算")
+    a(f"  机会链路 {ing.get('opportunity_track', 0)} 篇（参与推荐）"
+      f"   写作语料 {ing.get('corpus_only', 0)} 篇（只服务写作，不进推荐）")
+    if ing.get("by_collector_status"):
+        a("  按抓取状态：" + "，".join(f"{k or '?'} {v}" for k, v in ing["by_collector_status"]))
     if ing["recent_events"]:
         a("")
         a("【最近导入】")

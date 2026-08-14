@@ -71,15 +71,21 @@ def iter_json_records(text: str) -> Iterator[tuple[int, dict]]:
         offset = end
 
 
-def push_article(article: dict, *, correction: bool = False, url: str = "",
-                 key: str = "", retries: int = 3, timeout: int = 30) -> dict:
+def push_article(article: dict, *, correction: bool = False, corpus_only: bool = False,
+                 url: str = "", key: str = "", retries: int = 3, timeout: int = 30) -> dict:
     """推送一篇文章，返回服务端的结果。
 
-    返回里的 status 有三种：
+    返回里的 status 有四种：
       imported        —— 已生成项目卡
+      corpus_only     —— 只作写作语料保存，没做项目抽取（见下）
       not_opportunity —— 存了原文，但判定不是招募（纪实/回顾/行前预告）
       needs_text      —— 只收到链接没有正文，存成了待补线索
-    后两种都不是错误，不用重试，也不用改内容再发一遍。
+    后三种都不是错误，不用重试，也不用改内容再发一遍。
+
+    corpus_only=True 用于回采历史材料：实践总结、实践纪实、志愿故事、调研成果。
+    这些文章早已结束，进推荐没有意义；而"让服务端分类器自己判断"不够稳——
+    标题不带招募词的总结照样可能被抽成项目卡。带上这个标记，服务端只存文章
+    进写作语料，完全跳过项目抽取。仍按 source_url 去重。
 
     correction=True 用于订正一篇已经推过的文章：主办方改了通知（延期、名额
     调整、资格放宽），或者你发现之前那版正文抓漏了。
@@ -100,6 +106,8 @@ def push_article(article: dict, *, correction: bool = False, url: str = "",
     request_body = {**article, "input_type": "copied_text"}
     if correction:
         request_body["correction"] = True
+    if corpus_only:
+        request_body["corpus_only"] = True
     body = json.dumps(request_body, ensure_ascii=False).encode("utf-8")
     # 不走系统代理。本机代理常把内网/裸 IP 一起劫走，表现成莫名其妙的 502。
     opener = build_opener(ProxyHandler({}))
@@ -127,37 +135,58 @@ def push_article(article: dict, *, correction: bool = False, url: str = "",
 
 
 def main() -> int:
-    if len(sys.argv) != 2:
+    arguments = [item for item in sys.argv[1:] if not item.startswith("--")]
+    # 整批都是历史语料时用 --corpus-only；也可以在文件里逐条写 "corpus_only": true。
+    corpus_batch = "--corpus-only" in sys.argv
+    if len(arguments) != 1:
         print(__doc__)
         return 2
-    path = Path(sys.argv[1])
+    path = Path(arguments[0])
     if not path.is_file():
         print(f"找不到文件：{path}", file=sys.stderr)
         return 1
 
-    ok = failed = 0
     try:
         records = list(iter_json_records(path.read_text(encoding="utf-8")))
     except json.JSONDecodeError as exc:
         print(f"JSON 格式错误（第 {exc.lineno} 行）：{exc.msg}", file=sys.stderr)
         return 1
+
+    if corpus_batch:
+        print(f"以「只入语料」模式推送 {len(records)} 条：服务端只保存文章供写作参考，"
+              "不做项目抽取，不会进入推荐。\n")
+
+    ok = failed = 0
+    tally: dict[str, int] = {}
     for number, record in records:
+        title = str(record.get("title", ""))[:30]
         try:
-            # 文件里也可以写 "correction": true，逐条标记哪些是订正。
-            result = push_article(record, correction=bool(record.pop("correction", False)))
+            result = push_article(
+                record,
+                correction=bool(record.pop("correction", False)),
+                corpus_only=corpus_batch or bool(record.pop("corpus_only", False)),
+            )
         except PushFailed as exc:
             failed += 1
             print(f"  第 {number} 行  失败：{exc}")
             continue
         ok += 1
-        status = result.get("status", "?")
-        if result.get("corrected"):
-            status = "corrected"
-        title = (result.get("project") or {}).get("title", "")
-        print(f"  第 {number} 行  {status:<16} {title[:30]}")
+        status = "corrected" if result.get("corrected") else result.get("status", "?")
+        # 只入语料但正文太短的，服务端会明说它不会被当作范例检索出来——
+        # 这种别混在"成功"里一带而过，推的人需要知道要不要重抓。
+        if status == "corpus_only" and result.get("usable_as_sample") is False:
+            status = "语料·正文太短"
+        tally[status] = tally.get(status, 0) + 1
+        # corpus_only 的返回里没有 project，用原始标题回显。
+        shown = (result.get("project") or {}).get("title", "") or title
+        print(f"  第 {number} 行  {status:<16} {shown[:30]}")
+        if result.get("action_required"):
+            print(f"           {result['action_required'][:76]}")
         time.sleep(0.3)  # 别把服务刷满，评审期间它同时在给用户服务
 
     print(f"\n成功 {ok} 条，失败 {failed} 条")
+    for status, count in sorted(tally.items(), key=lambda kv: -kv[1]):
+        print(f"  {status}: {count}")
     return 0 if failed == 0 else 1
 
 

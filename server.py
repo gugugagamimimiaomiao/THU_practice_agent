@@ -495,6 +495,10 @@ class Handler(BaseHTTPRequestHandler):
             # 会挡下信息量下降的版本——而订正（延期、资格放宽、之前抽错了）
             # 恰恰常常更少，不给这个开关的话订正会悄悄失效。
             correction=bool(payload.get("correction")),
+            # corpus_only=true：这篇只作写作语料，不做项目抽取、不进推荐。
+            # 采集方回采历史总结和纪实时用，比让分类器去猜可靠——他们自己
+            # 知道这批是历史材料，而规则再准也只是概率。
+            corpus_only=bool(payload.get("corpus_only")),
         )
         self.json_response(result, 201 if result["status"] == "imported" else 202)
 
