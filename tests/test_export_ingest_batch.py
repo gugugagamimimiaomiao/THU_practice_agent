@@ -104,6 +104,24 @@ class ExportIngestBatchTests(unittest.TestCase):
         self.assertFalse(wewe_export_handoff.is_current_opportunity(expired))
         self.assertFalse(wewe_export_handoff.is_current_opportunity(demo))
 
+    def test_historical_corpus_gate_is_high_precision(self):
+        accepted = (
+            "实践总结丨以书信为桥，以行走为课",
+            "志愿劳动 | 科普游园会服务纪实",
+            "基层服务 | 支队调研成果总结",
+            "国际会议参会心得与实践感悟",
+        )
+        rejected = (
+            "志愿者招募通知",
+            "实践支队行前预告",
+            "调研团报名开启",
+            "普通校园活动回顾",
+        )
+        for title in accepted:
+            self.assertTrue(wewe_export_handoff.is_corpus_article(title), title)
+        for title in rejected:
+            self.assertFalse(wewe_export_handoff.is_corpus_article(title), title)
+
     def test_since_and_prior_handoffs_produce_a_true_increment(self):
         today = date.today()
         old = (today - timedelta(days=30)).isoformat()

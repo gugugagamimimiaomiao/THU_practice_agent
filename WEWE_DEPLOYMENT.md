@@ -67,6 +67,24 @@ https://mp.weixin.qq.com/s/<article-id>
 
 微信读书账号 `status=0` 时立即停止刷新，不重试、不轮换账号/IP/设备。重新扫码并确认 `status=1` 后，仍应先对单个优先 Feed 做一页验证；如果状态再次回到 `0`，当天停止上游刷新。已缓存文章和已入库机会不受影响。
 
+## 历史写作语料回采
+
+历史总结、纪实、心得和志愿服务复盘不参与日更机会补量，但可以单独回采给写作辅助使用。`corpus` 模式使用高精度标题规则，排除招募、报名、通知、预告和公示，并在每条记录中加入 `"corpus_only": true`：
+
+```bash
+python3 scripts/wewe_export_handoff.py \
+  --mode corpus \
+  --account 清华大学社会实践 \
+  --account 建院宣传中心 \
+  --account 水木华声 \
+  --since 2026-03-01 \
+  --need 15 \
+  --delay 1.5 \
+  --output data/exports/historical_corpus.jsonl
+```
+
+回采只读取 WeWe 已缓存的文章索引，再按候选逐篇获取全文；不要用它刷新整个历史列表。推送前先运行 `scripts/import_articles.py FILE --check`，并在临时数据库验证这些文章均返回 `not_opportunity`。远端投稿接口应将 `corpus_only` 视为硬隔离标记：保存原文、图片、来源和发布日期，但不创建项目卡。旧版服务器即使忽略这个新字段，高精度标题规则也应使文章进入 `not_opportunity`；批量投稿前仍需抽样验证。
+
 ## 本机持久化恢复
 
 本机非 Docker 验证统一使用项目内的 `data/wewe-rss.db`，该路径已被 `.gitignore` 排除且文件权限应为 `0600`。不要再把 `/private/tmp/.../wewe-rss.db` 当作运行库。启动与备份：
