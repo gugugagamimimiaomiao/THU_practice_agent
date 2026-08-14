@@ -55,8 +55,13 @@ def run_pending_ocr(database: Database, *, apply: bool) -> int:
         project = database.get_project(summary["id"])
         if project and project.get("image_ocr_status") == "pending" and project.get("image_sources"):
             pending.append(project)
-    print(f"待识别配图的项目 {len(pending)} 条\n")
-    if not pending:
+
+    # 语料文章（判为非招募、或明确只入语料的）不生成项目卡，但它们同样可能是
+    # 图片型推送——正文只有两三百字、内容全在长图里。这类不识别的话，语料库
+    # 里躺着的是一篇没内容的壳子。
+    corpus_pending = _articles_needing_ocr(database)
+    print(f"待识别配图：项目 {len(pending)} 条，语料文章 {len(corpus_pending)} 篇\n")
+    if not pending and not corpus_pending:
         return 0
 
     done = 0
@@ -101,9 +106,63 @@ def run_pending_ocr(database: Database, *, apply: bool) -> int:
             database.upsert_project(fresh, note="配图 OCR 后重抽")
         done += 1
 
+    corpus_done = _ocr_corpus_articles(database, corpus_pending, apply=apply)
+
     print()
-    print(f"完成 {done} 条" + ("" if apply else "（预演，没有写库；确认后加 --apply）"))
+    print(f"完成：项目 {done} 条，语料文章 {corpus_done} 篇"
+          + ("" if apply else "（预演，没有写库；确认后加 --apply）"))
     return 0
+
+
+def _articles_needing_ocr(database: Database) -> list[dict]:
+    """有配图、正文却短得不像完整文章的语料——信息多半在图里。
+
+    只取每个链接最新的那一版；已经含 OCR 段落的跳过，避免重复识别。
+    """
+    from corpus import MIN_SAMPLE_LENGTH
+
+    latest: dict[str, dict] = {}
+    with database.connect() as db:
+        for row in db.execute(
+            "SELECT id, source_url, title, source_account, raw_text, image_sources "
+            "FROM articles WHERE image_sources IS NOT NULL AND image_sources != '[]' ORDER BY id"
+        ):
+            record = dict(row)
+            try:
+                record["images"] = json.loads(record["image_sources"] or "[]")
+            except json.JSONDecodeError:
+                continue
+            if record["images"]:
+                latest[record["source_url"] or f"__id{record['id']}"] = record
+    return [
+        record for record in latest.values()
+        if len((record["raw_text"] or "").strip()) < MIN_SAMPLE_LENGTH
+        and "【公众号配图 OCR】" not in (record["raw_text"] or "")
+    ]
+
+
+def _ocr_corpus_articles(database: Database, records: list[dict], *, apply: bool) -> int:
+    """给语料文章补 OCR：识别出的文字并回 raw_text，让它够得上范例门槛。"""
+    from wechat_image_ocr import ocr_wechat_images
+
+    done = 0
+    for record in records:
+        result = ocr_wechat_images(record["images"], cookie=os.getenv("WECHAT_COOKIE", ""))
+        if not result.runtime_available:
+            print(f"── 未装 OCR 引擎，跳过：{(record['title'] or '')[:36]}")
+            continue
+        before = len((record["raw_text"] or "").strip())
+        if not result.text.strip():
+            print(f"── {(record['title'] or '')[:36]}  {len(record['images'])} 张图未识别出文字")
+            continue
+        merged = f"{record['raw_text']}\n\n【公众号配图 OCR】\n{result.text}"
+        print(f"── {(record['title'] or '')[:36]}")
+        print(f"     正文 {before} 字 → {len(merged.strip())} 字（{result.completed}/{len(record['images'])} 张识别到文字）")
+        if apply:
+            with database.connect() as db:
+                db.execute("UPDATE articles SET raw_text=? WHERE id=?", (merged, record["id"]))
+        done += 1
+    return done
 
 
 def _latest_article(database: Database, source_url: str) -> dict | None:
