@@ -146,6 +146,48 @@ class PublishGateTests(unittest.TestCase):
         self.assertEqual(project["signup_deadline"], "2026-08-14")
         self.assertEqual(project["status"], "published")
 
+    def test_extracts_deadline_written_as_fill_form_before_date(self):
+        notice = "\n".join([
+            "第六届中非未来领袖对话四川行青年代表招募",
+            "报名通道：",
+            "于7月9日（周四）中午12点前，填写在线问卷https://example.com/form",
+        ])
+        project = extract_project(notice, self.META, today=date(2026, 7, 9))
+        self.assertEqual(project["signup_deadline"], "2026-07-09")
+        self.assertIn("填写在线问卷", project["field_evidence"]["signup_deadline"]["quote"])
+
+    def test_extracts_submission_deadline_for_an_open_call(self):
+        notice = "\n".join([
+            "建筑学院80周年院庆主题logo及周边文创设计作品征集",
+            "作品征集截止",
+            "5月31日 24:00",
+            "提交方式：填写在线表单并上传设计文件",
+        ])
+        project = extract_project(notice, self.META, today=date(2026, 5, 17))
+        self.assertEqual(project["signup_deadline"], "2026-05-31")
+
+    def test_extracts_ddl_and_bracketed_before_form_deadlines(self):
+        ddl = extract_project(
+            "支队招募\n第一批次支队员报名DDL：6.5（周五）晚上24:00",
+            self.META,
+            today=date(2026, 6, 5),
+        )
+        bracketed = extract_project(
+            "志愿者招募\n请有意愿参与的同学于【6月5日12时前】填写下方问卷",
+            self.META,
+            today=date(2026, 6, 2),
+        )
+        self.assertEqual(ddl["signup_deadline"], "2026-06-05")
+        self.assertEqual(bracketed["signup_deadline"], "2026-06-05")
+
+    def test_extracts_dated_before_upload_instruction(self):
+        notice = (
+            "作品征集\n请报送人于2026年7月10日（星期五）前，将作品成稿上传至百度云，"
+            "并将网盘链接发送至主办方邮箱"
+        )
+        project = extract_project(notice, self.META, today=date(2026, 5, 15))
+        self.assertEqual(project["signup_deadline"], "2026-07-10")
+
     def test_lead_in_line_is_not_mistaken_for_the_eligibility(self):
         """「报名要求：我们希望你是：」本身不含条件，真正的条件在后面几行。
 
