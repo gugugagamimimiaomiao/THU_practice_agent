@@ -112,6 +112,48 @@
       "feed_id": "MP_WXS_3929717882",
       "status": "queued_for_subscription",
       "verified_at": "2026-08-13"
+    },
+    {
+      "name": "电机之声",
+      "article_url": "https://mp.weixin.qq.com/s/6Is1PUvbVH0pkmMZaKfJxg",
+      "feed_id": "MP_WXS_3077941739",
+      "status": "queued_for_subscription",
+      "verified_at": "2026-08-13"
+    },
+    {
+      "name": "莱小福",
+      "article_url": "https://mp.weixin.qq.com/s/GDAhEvuO5sbng2_A-VFCUg",
+      "feed_id": "MP_WXS_3908674177",
+      "status": "queued_for_subscription",
+      "verified_at": "2026-08-13"
+    },
+    {
+      "name": "数无穹",
+      "article_url": "https://mp.weixin.qq.com/s/HY8rwkS4iIduF_KA48-Nag",
+      "feed_id": "MP_WXS_3085614500",
+      "status": "queued_for_subscription",
+      "verified_at": "2026-08-13"
+    },
+    {
+      "name": "THU长乐未央",
+      "article_url": "https://mp.weixin.qq.com/s/wCHwLCtYDfY0Y1Yr-D8Y-w",
+      "feed_id": "MP_WXS_3883690654",
+      "status": "queued_for_subscription",
+      "verified_at": "2026-08-13"
+    },
+    {
+      "name": "卡安",
+      "article_url": "https://mp.weixin.qq.com/s/B0n3Rwqm3uyT-mHobBamWg",
+      "feed_id": "MP_WXS_2392633225",
+      "status": "queued_for_subscription",
+      "verified_at": "2026-08-13"
+    },
+    {
+      "name": "清华清小新",
+      "article_url": "https://mp.weixin.qq.com/s/KHZ0cUrZpEqjtxxcwybfUw",
+      "feed_id": "MP_WXS_2397450622",
+      "status": "queued_for_subscription",
+      "verified_at": "2026-08-13"
     }
   ],
   "pending_canonical_url": [
@@ -127,26 +169,21 @@
     "新车匠",
     "微爱意",
     "IE小研",
-    "电机之声",
     "酒井资讯",
     "紫冬话语",
     "软小宣",
     "芯系清华",
     "力小翼",
     "天工物华",
-    "卡安",
     "象图学院",
-    "数无穹",
     "清物语",
     "清化宣传",
-    "莱福",
     "清心地学",
     "茶园资讯",
     "清华经管家园",
     "公管声音",
     "吾道清年",
     "Lawgic",
-    "清华清小新",
     "清马来了",
     "文心载道",
     "社氏有声",
@@ -159,7 +196,6 @@
     "THU为先",
     "THU水木秀钟",
     "强基致理想",
-    "THU长乐未央",
     "探微观止",
     "THU天行健",
     "THU清清园中葵",
