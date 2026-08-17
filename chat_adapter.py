@@ -1210,7 +1210,13 @@ class PracticeChatAdapter:
         corpus = self._corpus()
         genre = next((name for words, name in self._GENRE_FOR_QUESTION
                       if any(word in latest or word in draft[:60] for word in words)), "")
-        samples = corpus.search(draft[:200], genre=genre, limit=2) or corpus.search(draft[:200], limit=2)
+        samples = corpus.search(draft[:200], genre=genre, limit=2)
+        if not samples and genre:
+            # 主题对不上时用同体裁的代表作。润色本来就主要学文体和节奏，
+            # 不像"帮我写某某项目的推送"那样需要主题也贴。
+            samples = corpus.representatives(genre, limit=2)
+        if not samples:
+            samples = corpus.search(draft[:200], limit=2)
 
         if not llm.is_enabled():
             return ChatResult(
@@ -1239,11 +1245,15 @@ class PracticeChatAdapter:
         if not body.strip():
             return ChatResult("这段我没能给出更好的版本，换个说法再试一次？", "polish_degraded")
 
-        tail = ""
+        # 有没有参照过范文，要说清楚。没找到同类范例时改写照做（润色本来就
+        # 不依赖范文），但不能让人以为背后有一堆真实推文撑着。
         if samples:
             tail = ("\n\n---\n\n参照了库里这几篇真实推文的写法："
                     + "、".join(f"《{s.title[:26]}》" for s in samples)
                     + "。里面的日期地点属于那些项目本身，没有被写进你的稿子。")
+        else:
+            tail = ("\n\n---\n\n这次没有找到足够接近的同类范文，上面是按通用写作原则改的。"
+                    "想让它更贴近清华公众号的文风，把你想模仿的那篇正文贴给我。")
         return ChatResult(body.strip() + tail, "polish")
 
     def _corpus_stats(self, latest: str) -> ChatResult:
@@ -1394,14 +1404,31 @@ class PracticeChatAdapter:
         genre = next((name for words, name in self._GENRE_FOR_QUESTION
                       if any(word in question for word in words)), "")
         corpus = self._corpus()
-        samples = corpus.search(question, genre=genre, limit=3) or corpus.search(question, limit=3)
+        # 三级：先找主题也对得上的；退而求其次给同体裁的代表作；都没有才说没有。
+        #
+        # 中间这一级是必要的：分数跟查询长度挂钩，「实践总结怎么写」这种最自然的
+        # 短问法只有 0.19 分，够不着门槛——而库里有 15 篇实践总结。用户点明了
+        # 体裁，体裁本身就是强相关信号，不该再被分数否决。
+        samples = corpus.search(question, genre=genre, limit=3)
+        by_topic = bool(samples)
+        if not samples and genre:
+            samples = corpus.representatives(genre, limit=3)
+        if not samples:
+            samples = corpus.search(question, limit=3)
+            by_topic = bool(samples)
 
         if not samples:
+            # 检索有分数下限：勉强沾边的不算数。与其拿一篇不相干的文章当范文，
+            # 不如说清楚没有——这跟项目一贯的做法一致，宁可说不会。
+            available = "、".join(f"{k}{v}篇" for k, v in
+                                  sorted(corpus.genres().items(), key=lambda kv: -kv[1]))
             return (
-                "我这边的语料库里还没有同类的真实推文可以参考——目前收录的都是"
-                f"{'、'.join(corpus.genres()) or '（暂无）'}这几类。\n\n"
-                "你可以把想模仿的那篇推文正文贴给我，我照着它的结构和语气来写；"
-                "或者说出一个具体项目名，我按项目卡里的已核验信息给你出材料。"
+                f"库里 {len(corpus)} 篇真实推文里，没有和你这个问题足够接近的同类范例"
+                f"（现有的是：{available or '暂无'}）。硬找一篇不相干的照着学，"
+                "写出来的东西会跑偏，所以我不那么做。\n\n"
+                "两个办法：把你想模仿的那篇正文贴给我，我照着它的结构和语气写；"
+                "或者说得更具体一点——比如「志愿服务招募推送怎么写」这样点明文体，"
+                "我更容易找到对得上的。"
             )
 
         from corpus import build_reference_block
@@ -1437,9 +1464,13 @@ class PracticeChatAdapter:
             try:
                 body = llm.complete(system_prompt, f"用户的问题：{question}\n\n{reference}")
                 if body.strip():
+                    # 说清楚这几篇是"主题也对得上"还是"只是同一类的代表作"。
+                    # 两种都有用，但不该混为一谈——后者只保证文体像，不保证主题像。
+                    lead = ("上面的写法建议参考了这几篇真实推文：" if by_topic
+                            else f"没有找到主题正好对上的，下面是库里「{genre}」这一类的代表作，"
+                                 "文体和结构可以参考：")
                     return (
-                        f"{body.strip()}\n\n---\n\n"
-                        f"上面的写法建议参考了这几篇真实推文：\n{listing}\n\n"
+                        f"{body.strip()}\n\n---\n\n{lead}\n{listing}\n\n"
                         "里面的日期、地点、联系方式都属于这些项目本身，别直接搬。"
                         "要写你自己项目的成稿，说出项目名就行——那时我会用项目卡里已核验的信息。"
                     )
