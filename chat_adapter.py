@@ -27,8 +27,10 @@ from domain import (
     KNOWN_DEPARTMENTS,
     KNOWN_LOCATIONS,
     THEME_KEYWORDS,
+    expand_location_query,
     extract_project,
     generate_asset,
+    project_location_text,
     recommend_projects,
 )
 
@@ -352,6 +354,18 @@ CORPUS_STATS_HINTS = (
     "收录了多少", "有多少篇", "数据量", "样本量", "语料",
 )
 
+# 追问推荐依据的问法。故意不收「怎么样」——那是润色请求的词，
+# 也不收裸的「依据」——「报名依据」是另一回事。
+_WHY_RE = re.compile(
+    r"为什么|为何|为啥|凭什么|凭啥|"
+    r"(?:什么|啥|哪些)(?:依据|标准|条件)|"
+    r"(?:依据|标准|条件)(?:是什么|有哪些)|"
+    r"怎么(?:判断|排的?序|算出?来?的|选出?来?的|得出|来的)|"
+    r"如何(?:判断|排序|筛选|选)|"
+    r"库里(?:真的)?(?:就)?没有"
+)
+
+
 def _autolink(url: str) -> str:
     """把链接包成 Markdown 自动链接，防止渲染器把它拆散。
 
@@ -510,6 +524,11 @@ class PracticeChatAdapter:
         # 盛夏的七月，我们踏上了前往西部的列车」被匹配成了某个项目的详情页。
         if self._is_polish_request(latest):
             return self._polish_text(latest)
+        # 「为什么推荐不在京津冀的？是库里没有吗」——这句里有"推荐"，以前被
+        # RECOMMEND_WORDS 接走，把同一份列表原样重跑一遍，等于答非所问。
+        # 追问推荐依据是评委最可能问的一句，必须单独接住。
+        if self._is_why_question(latest, user_messages):
+            return self._explain_recommendation(all_user_text)
         # 对已采集数据的统计性提问。同样要排在项目匹配之前——「实践招募一般
         # 什么时候发布」里的"实践招募"会模糊命中一堆标题，变成项目候选列表。
         if any(word in latest for word in CORPUS_STATS_HINTS) and not self._mentions_project_exactly(latest):
@@ -673,12 +692,15 @@ class PracticeChatAdapter:
             "available_end": "",
             "themes": [],
             "preferred_locations": [],
+            "location_labels": [],
             "reimbursement_preference": "not_important",
         }
         profile["department"] = next((item for item in KNOWN_DEPARTMENTS if item in text), "")
         profile["grade"] = next((item for item in GRADE_TERMS if item in text), "")
         profile["themes"] = [theme for theme, words in THEME_KEYWORDS.items() if theme in text or any(word.lower() in text.lower() for word in words)]
-        profile["preferred_locations"] = [item for item in KNOWN_LOCATIONS if item in text]
+        # labels 是用户原话（「京津冀」），preferred_locations 是展开后的省份
+        # （北京/天津/河北）。跟用户说话用前者，做匹配用后者。
+        profile["location_labels"], profile["preferred_locations"] = expand_location_query(text)
         if any(word in text for word in ["必须报销", "必须有报销", "必须有补贴", "只要有报销", "经费必须"]):
             profile["reimbursement_preference"] = "required"
         elif any(word in text for word in ["优先报销", "优先有补贴", "最好有报销", "偏好报销"]):
@@ -692,10 +714,131 @@ class PracticeChatAdapter:
                 profile["available_start"], profile["available_end"] = span
         return profile
 
+    def _is_why_question(self, latest: str, user_messages: list[str]) -> bool:
+        """这句是在追问推荐依据，而不是发起一次新的推荐。
+
+        只靠「为什么」三个字不够——「为什么实践总结这么难写」是写作求助，
+        不该抢过来。所以还要求它指向推荐结果：要么这句里点了名
+        （推荐/排序/这几个），要么上一句本来就是在要推荐。
+        """
+        if not _WHY_RE.search(latest):
+            return False
+        if any(word in latest for word in ("推荐", "排序", "排名", "这几个", "这些", "第一个", "结果", "选出")):
+            return True
+        prior = user_messages[-2] if len(user_messages) >= 2 else ""
+        return bool(prior) and any(
+            word in prior for word in RECOMMEND_WORDS + FILTER_WORDS
+        )
+
+    def _explain_recommendation(self, all_user_text: str) -> ChatResult:
+        """把这次排序的依据摊开讲：读到了什么条件、地点满足没满足、分怎么给的。
+
+        这段刻意全部用当次的真实数字，不写通用套话——「库里符合京津冀的有 4 个」
+        是可以被当场证伪的，「我们会综合考虑地域因素」不是。
+        """
+        profile = self._extract_profile(all_user_text)
+        result = recommend_projects(self._projects(include_expired=True), profile)
+        lines = ["## 这次是怎么排的"]
+
+        read: list[str] = []
+        if profile.get("grade"):
+            read.append(f"年级：{profile['grade']}")
+        if profile.get("available_start"):
+            read.append(f"可用时间：{profile['available_start']} 到 {profile['available_end']}")
+        if profile.get("themes"):
+            read.append(f"主题：{'、'.join(profile['themes'])}")
+        if profile.get("location_labels"):
+            expanded = "、".join(profile.get("preferred_locations", [])[:8])
+            read.append(f"地点：{'、'.join(profile['location_labels'])}（展开成 {expanded} 去匹配）")
+        if profile.get("reimbursement_preference") != "not_important":
+            read.append("经费：你要求有报销")
+        lines.append("\n**从你的话里读到的条件**\n")
+        lines.extend(f"- {item}" for item in read)
+        if not read:
+            lines.append("- 没读到明确条件——没提年级、时间、主题或地点，所以只能按通用规则排。")
+
+        if profile.get("location_labels"):
+            said = "、".join(f"「{item}」" for item in profile["location_labels"])
+            lines.append(f"\n**关于{said}**\n")
+            in_list = result.get("location_matched", 0)
+            anywhere = result.get("location_matched_all", 0)
+            if in_list:
+                lines.append(f"- 库里符合的有 {anywhere} 个，其中 {in_list} 个进了正式推荐，已排在最前面。")
+            elif anywhere:
+                lines.append(f"- 库里符合的有 {anywhere} 个，但都没进正式推荐：已截止，或关键字段还没核对完。")
+            else:
+                lines.append("- **库里目前一个都没有。**上面列出来的都不在这个范围内。")
+            blank = sum(
+                1 for project in self._projects(include_expired=True)
+                if not project.get("demo_data") and not project_location_text(project).strip()
+            )
+            if blank:
+                lines.append(f"- 另有 {blank} 个项目原文没写明地点，判断不了在不在范围内——这是原文本身缺信息，不是没查。")
+
+        lines.append("\n**排序依据**\n")
+        lines.append("按这几项加总，从高到低排；地点命中的一律提到最前面：")
+        lines.append("- 实践时间与你的可用时间有重叠：+25")
+        lines.append("- 主题命中你说的方向：+25（没说主题时统一 +12）")
+        lines.append("- 地点命中：+15")
+        lines.append("- 来源公众号的可靠度、字段置信度：各占一部分")
+        lines.append("- 原文缺字段：每缺一项 -3，最多扣 15")
+
+        lines.append(
+            f"\n本次共 {len(result['eligible'])} 个进正式推荐、"
+            f"{len(result['potential'])} 个待核验、"
+            f"{len(result['excluded'])} 个被硬条件排除（截止、时间冲突、资格或经费不符）。"
+        )
+        lines.append(
+            "\n> 这个分数是**针对你这次的提问**算的，不是项目本身的评分。"
+            "换个问法同一个项目分数会变——比如不提主题词就少 13 分。"
+            "所以界面上只给排序，不显示分数。"
+        )
+        lines.append("\n想看某一条为什么排在那里，说出它标题里的几个字，我给你逐字段的原文引用。")
+        return ChatResult("\n".join(lines), "explain_recommendation")
+
+    def _location_note(self, profile: dict[str, Any], result: dict[str, Any]) -> str:
+        """说清楚地域偏好到底满足没满足。没有偏好就返回空串。
+
+        为什么必须有这一段：地点在打分里只值 +15，很容易被主题（+25）和时间（+25）
+        压过去，于是「想找京津冀附近的支教」推出来第一条是湖南、第二条是河南，
+        而**整段回复里一个地名都不提**——学生无从判断是自己没说清楚、是库里没有、
+        还是系统压根没听见。实测时接着追问「是库里没有吗」，它继续不答。
+        三种情况都得给个准话。
+        """
+        labels = profile.get("location_labels") or []
+        if not labels or not result.get("location_asked"):
+            return ""
+        said = "、".join(f"「{item}」" for item in labels)
+        in_list = result.get("location_matched", 0)
+        anywhere = result.get("location_matched_all", 0)
+
+        if in_list:
+            note = f"你提到了{said}：库里符合的有 {in_list} 个，已经排在最前面。"
+            if len(result.get("eligible", [])) > in_list:
+                note += "排在后面的不在这个范围内，是按时间和主题补上的。"
+        elif anywhere:
+            note = (
+                f"你提到了{said}：这个范围内有 {anywhere} 个项目，但都没能进正式推荐"
+                "（已截止，或关键字段还没核对完）。下面几条**不在**你要的范围里。"
+            )
+        else:
+            note = f"你提到了{said}：**库里目前一个都没有。**下面几条不在这个范围内，只满足其它条件。"
+
+        blank = sum(
+            1 for project in self._projects(include_expired=True)
+            if not project.get("demo_data") and not project_location_text(project).strip()
+        )
+        if blank:
+            note += f"另有 {blank} 个项目的原文没写明地点，无法判断在不在范围内。"
+        return note
+
     def _recommend(self, text: str) -> ChatResult:
         profile = self._extract_profile(text)
         result = recommend_projects(self._projects(include_expired=True), profile)
         lines = ["## 正式推荐"]
+        note = self._location_note(profile, result)
+        if note:
+            lines.append(f"\n> {note}\n")
         if not result["eligible"]:
             # 空结果最容易发生在换了真实数据、或全部项目都过了截止的时候。
             # 与其只说一句"没有"，不如说清楚是被什么条件挡住的、下一步怎么放宽。
@@ -1173,7 +1316,12 @@ class PracticeChatAdapter:
         if (project.get("reimbursement") or {}).get("has_reimbursement"):
             facts.append("有经费支持")
 
-        lines = [f"{index}. **{project['title']}**（匹配度 {round(item['score'])}）"]
+        # 这里原来跟着一个「（匹配度 65）」。去掉了：那个分数是相对当次提问算的，
+        # 同一个项目问「京津冀的支教」得 65、问「为什么这么推荐」得 52——差的
+        # 13 分来自主题词有没有命中（+25 对 +12），跟项目本身好不好毫无关系。
+        # 界面上只给个光秃秃的数字，看起来就像在随机跳动。排序已经表达了优劣，
+        # 想要量化依据的人可以直接问「为什么这么推荐」。
+        lines = [f"{index}. **{project['title']}**"]
         if facts:
             lines.append(f"   - {'；'.join(facts)}")
         missing = [FIELD_LABELS.get(name, name) for name in project.get("uncertain_fields", [])

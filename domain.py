@@ -28,6 +28,75 @@ KNOWN_LOCATIONS = [
     "海南", "香港", "澳门", "台湾", "线上",
 ]
 
+# 区域词 → 它覆盖的省级行政区。
+#
+# 为什么需要这层映射：KNOWN_LOCATIONS 是一张省份平铺表，学生说「京津冀」「长三角」
+# 「西部」的时候，一个词都命中不了，抽出来的 preferred_locations 是空列表——于是
+# 「想找京津冀附近的调研或支教类实践」和完全不提地点走的是同一条代码路径。
+# 实测（2026-08-20，线上真实库）：那句话推出来的前两条是湖南新宁和河南，而库里
+# 明明有北京和河北的项目。
+#
+# 范围按国家统计局的经济区划走，「西部」用西部大开发的口径（含广西、内蒙古）。
+# 边界有争议的地方（比如内蒙古算不算华北）不追求学术精确——这里的用途是理解
+# 学生想去哪儿，宁可多覆盖一个省，也别把人想要的地方漏掉。
+LOCATION_GROUPS: dict[str, tuple[str, ...]] = {
+    "京津冀": ("北京", "天津", "河北"),
+    "环渤海": ("北京", "天津", "河北", "山东", "辽宁"),
+    "长三角": ("上海", "江苏", "浙江", "安徽"),
+    "珠三角": ("广东",),
+    "粤港澳": ("广东", "香港", "澳门"),
+    "华北": ("北京", "天津", "河北", "山西", "内蒙古"),
+    "东北": ("辽宁", "吉林", "黑龙江"),
+    "华东": ("上海", "江苏", "浙江", "安徽", "福建", "江西", "山东"),
+    "华中": ("河南", "湖北", "湖南"),
+    "华南": ("广东", "广西", "海南"),
+    "西南": ("重庆", "四川", "贵州", "云南", "西藏"),
+    "西北": ("陕西", "甘肃", "青海", "宁夏", "新疆"),
+    "西部": ("重庆", "四川", "贵州", "云南", "西藏", "陕西", "甘肃",
+             "青海", "宁夏", "新疆", "广西", "内蒙古"),
+}
+
+# 校内地点在库里是以 detail 字符串存的（「中关村街道（学校周边社区）」
+# 「紫荆学生区（C楼门口）」），province 字段是空的。不做这层补充的话，
+# 问「京津冀」的人看不到这些明明就在北京的项目。
+# 只收录地理上没有歧义的几个，不做泛化猜测。
+CAMPUS_TO_PROVINCE: dict[str, str] = {
+    "紫荆": "北京", "中关村": "北京", "清华园": "北京", "学堂路": "北京",
+}
+
+
+def expand_location_query(text: str) -> tuple[list[str], list[str]]:
+    """从一句话里认出地域意图，返回（用户原话里的地域词，展开后的省份表）。
+
+    返回两个列表是因为它们的用途不同：原话用来跟用户说人话（「符合『京津冀』的
+    有 4 个」），展开后的省份用来做匹配。只留一个的话，要么匹配不上，要么
+    只能干巴巴地回「符合『北京、天津、河北』的有 4 个」。
+    """
+    labels: list[str] = []
+    provinces: list[str] = []
+    for group, members in LOCATION_GROUPS.items():
+        if group in text:
+            labels.append(group)
+            provinces.extend(members)
+    for place in KNOWN_LOCATIONS:
+        if place in text:
+            labels.append(place)
+            provinces.append(place)
+    # 去重但保持出现顺序，让后面拼出来的说明文字跟用户的说法同序。
+    return list(dict.fromkeys(labels)), list(dict.fromkeys(provinces))
+
+
+def project_location_text(project: dict[str, Any]) -> str:
+    """把一个项目所有跟地点有关的字段拼成一条待匹配文本，并补上校内地名的省份。"""
+    location = project.get("location") or {}
+    parts = [str(location.get(key, "") or "") for key in ("province", "city", "detail", "mode")]
+    text = " ".join(parts)
+    for campus, province in CAMPUS_TO_PROVINCE.items():
+        if campus in text and province not in text:
+            text += " " + province
+    return text
+
+
 KNOWN_DEPARTMENTS = [
     "建筑学院", "土木系", "水利系", "环境学院", "机械系", "精仪系", "能源与动力工程系",
     "车辆学院", "工业工程系", "电机系", "电子系", "计算机系", "自动化系", "集成电路学院",
@@ -700,6 +769,10 @@ class MatchResult:
     reasons: list[str]
     warnings: list[str]
     excluded_reasons: list[str]
+    # 这次提问的地域偏好有没有落在这个项目上。单独拎出来是因为展示层要用它排序、
+    # 也要用它组织说明文字，而从 reasons 里反查字符串（找「匹配地点偏好：」前缀）
+    # 太脆——改一个字的文案就会悄悄失效。
+    location_match: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -708,6 +781,7 @@ class MatchResult:
             "reasons": self.reasons,
             "warnings": self.warnings,
             "excluded_reasons": self.excluded_reasons,
+            "location_match": self.location_match,
         }
 
 
@@ -757,9 +831,9 @@ def score_project(project: dict[str, Any], profile: dict[str, Any], *, today: da
         score += 12
 
     preferred_locations = _as_set(profile.get("preferred_locations"))
-    location = project.get("location", {})
-    location_text = " ".join(str(location.get(k, "")) for k in ["province", "city", "detail", "mode"])
+    location_text = project_location_text(project)
     matched_locations = {place for place in preferred_locations if place in location_text}
+    location_match = bool(matched_locations)
     if matched_locations:
         score += 15
         reasons.append(f"匹配地点偏好：{'、'.join(sorted(matched_locations))}")
@@ -792,7 +866,8 @@ def score_project(project: dict[str, Any], profile: dict[str, Any], *, today: da
     if project.get("demo_data") and not any("演示数据" in warning for warning in warnings):
         warnings.append("这是演示数据，不可作为真实报名依据")
 
-    return MatchResult(project, max(0.0, min(100.0, score)), reasons, warnings, excluded)
+    return MatchResult(project, max(0.0, min(100.0, score)), reasons, warnings, excluded,
+                       location_match=location_match)
 
 
 def recommend_projects(projects: list[dict[str, Any]], profile: dict[str, Any], *, today: date | None = None) -> dict[str, Any]:
@@ -812,13 +887,32 @@ def recommend_projects(projects: list[dict[str, Any]], profile: dict[str, Any], 
             eligible.append(item)
         else:
             potential.append(item)
-    eligible.sort(key=lambda item: item["score"], reverse=True)
-    potential.sort(key=lambda item: item["score"], reverse=True)
+    # 说了地域偏好的时候，命中的一律排在前面，而不是只靠那 +15 分去挤名次。
+    #
+    # 之前地点纯粹是加分项，+15 分很容易被主题匹配（+25）和时间匹配（+25）盖过去：
+    # 学生问「京津冀附近的支教」，一个湖南的支教项目照样能排在北京的项目前面，
+    # 而且回复里对地域只字不提。学生说了地点，就是把它当筛选条件用的，
+    # 排序必须体现这一点。至于要不要把不匹配的也列出来——列，但要说清楚。
+    def _rank(item: dict[str, Any]) -> tuple[int, float]:
+        return (0 if item.get("location_match") else 1, -item["score"])
+
+    eligible.sort(key=_rank)
+    potential.sort(key=_rank)
     excluded.sort(key=lambda item: item["score"], reverse=True)
+
+    asked_locations = bool(_as_set(profile.get("preferred_locations")))
     return {
         "eligible": eligible,
         "potential": potential,
         "excluded": excluded,
+        # 展示层要靠这几个数字写出「符合的有 N 个」或「一个都没有」，
+        # 而不是在没命中的时候干脆不提地域。
+        "location_asked": asked_locations,
+        "location_matched": sum(1 for item in eligible if item.get("location_match")),
+        "location_matched_all": sum(
+            1 for bucket in (eligible, potential, excluded)
+            for item in bucket if item.get("location_match")
+        ),
         "policy": "正式推荐仅包含 published 项目；needs_review 项目单列为潜在机会。",
     }
 
