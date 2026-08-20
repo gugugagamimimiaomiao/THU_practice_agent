@@ -762,10 +762,21 @@ class PracticeChatAdapter:
             lines.append(f"\n**关于{said}**\n")
             in_list = result.get("location_matched", 0)
             anywhere = result.get("location_matched_all", 0)
-            if in_list:
-                lines.append(f"- 库里符合的有 {anywhere} 个，其中 {in_list} 个进了正式推荐，已排在最前面。")
-            elif anywhere:
-                lines.append(f"- 库里符合的有 {anywhere} 个，但都没进正式推荐：已截止，或关键字段还没核对完。")
+            if anywhere:
+                lines.append(f"- 库里符合的一共 {anywhere} 个，逐个交代去向：")
+                # 只说「4 个里有 1 个进了推荐」等于把追问推到下一轮。
+                # 剩下那几个卡在哪，这里一次说完。
+                bucket_names = {
+                    "eligible": "进了正式推荐",
+                    "potential": "待核验，没进正式推荐",
+                    "excluded": "被硬条件排除",
+                }
+                for entry in result.get("location_matched_detail", [])[:8]:
+                    where = bucket_names.get(entry["bucket"], entry["bucket"])
+                    why = f"（{entry['why']}）" if entry["why"] else ""
+                    lines.append(f"  - {entry['title'][:32]}：{where}{why}")
+                if not in_list:
+                    lines.append("  - 所以上面列出来的都不在这个范围内。")
             else:
                 lines.append("- **库里目前一个都没有。**上面列出来的都不在这个范围内。")
             blank = sum(

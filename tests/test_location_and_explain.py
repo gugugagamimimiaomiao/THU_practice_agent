@@ -154,8 +154,11 @@ class ExplainIntentTests(unittest.TestCase):
         content = self.reply("想找京津冀附近的实践",
                              "为什么推荐不在京津冀的？是库里没有吗").content
         self.assertIn("京津冀", content)
+        # 断言实质而不是字面：要么给出一个可核对的数量，要么明说一个都没有。
+        # 绑死措辞的话，以后改一个字这条就会误报。
+        import re as _re
         self.assertTrue(
-            "库里符合的有" in content or "一个都没有" in content,
+            _re.search(r"符合的一共 \d+ 个", content) or "一个都没有" in content,
             f"没有正面回答库里有没有：\n{content}",
         )
 

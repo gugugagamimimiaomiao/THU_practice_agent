@@ -913,6 +913,21 @@ def recommend_projects(projects: list[dict[str, Any]], profile: dict[str, Any], 
             1 for bucket in (eligible, potential, excluded)
             for item in bucket if item.get("location_match")
         ),
+        # 光说「符合的有 4 个，其中 1 个进了推荐」，剩下 3 个的去向仍然是个谜——
+        # 而那正好是追问的下一句。这里把每个符合地点的项目落在哪个桶、
+        # 因为什么落在那里，一并带出去。
+        "location_matched_detail": [
+            {
+                "title": item["project"].get("title", ""),
+                "bucket": name,
+                "why": "；".join(
+                    (item.get("excluded_reasons") or item.get("warnings") or [])[:2]
+                ),
+            }
+            for name, bucket in (("eligible", eligible), ("potential", potential),
+                                 ("excluded", excluded))
+            for item in bucket if item.get("location_match")
+        ],
         "policy": "正式推荐仅包含 published 项目；needs_review 项目单列为潜在机会。",
     }
 
