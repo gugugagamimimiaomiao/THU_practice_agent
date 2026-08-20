@@ -352,6 +352,26 @@ CORPUS_STATS_HINTS = (
     "收录了多少", "有多少篇", "数据量", "样本量", "语料",
 )
 
+def _autolink(url: str) -> str:
+    """把链接包成 Markdown 自动链接，防止渲染器把它拆散。
+
+    在清小搭里实测到的：库里存的是完整链接
+
+        https://mp.weixin.qq.com/s?sn=6bc0320d...&__biz=MjM5NDczNDYyNQ==&mid=2654153808&idx=1
+
+    页面上却渲染成 `https://mp.weixin.qq.com/s?s` ——公众号链接里的 `__biz`
+    带双下划线，Markdown 会把它当成粗体标记，把后半截 URL 吃掉。
+
+    这个 bug 只有在真实界面里才看得见：所有纯文本测试拿到的都是完整链接，
+    看不出渲染之后会坏。而「点原文自己核对」是这个产品的核心承诺，链接断了
+    等于承诺落空。
+
+    尖括号是 Markdown 的 autolink 语法，里面的内容不参与其它标记解析。
+    """
+    url = (url or "").strip()
+    return f"<{url}>" if url else ""
+
+
 # 「比较」当副词用时不是要对比项目：「比较多」「比较难」「比较早」。
 # 「哪些主题的实践比较多」实测被这个词抢走，变成了两个项目的对比表格。
 _COMPARE_RE = re.compile(r"比较(?![多少好难易大小早晚快慢久短高低远近贵便])|对比|哪个好|区别|选哪个")
@@ -1161,7 +1181,7 @@ class PracticeChatAdapter:
         if missing:
             lines.append(f"   - 原文未写明：{'、'.join(missing[:4])}——以原文为准")
         if project.get("source_url"):
-            lines.append(f"   - 原文：{project['source_url']}")
+            lines.append(f"   - 原文：{_autolink(project['source_url'])}")
         lines.append(f"   - 理由：{'；'.join(item['reasons'][:2]) or '信息完整度较高'}")
         return lines
 
@@ -1626,7 +1646,7 @@ class PracticeChatAdapter:
         if project.get("demo_data"):
             lines += ["", "> 这是演示数据，不能作为真实报名依据。"]
         if project.get("source_url"):
-            lines.append(f"\n原文链接：{project['source_url']}")
+            lines.append(f"\n原文链接：{_autolink(project['source_url'])}")
         else:
             lines.append("\n> 这条记录没有原文链接，报名前请自行核对来源通知。")
 
