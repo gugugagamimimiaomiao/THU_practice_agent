@@ -982,17 +982,26 @@ class PracticeChatAdapter:
         in_list = result.get("location_matched", 0)
         anywhere = result.get("location_matched_all", 0)
 
+        # 有没有"补位"的条目，决定了这段话能不能说「下面几条」。
+        # 排他模式下一条都不补，说了就自相矛盾——实测出现过：
+        # 「库里目前一个都没有。下面几条不在这个范围内」紧跟着
+        # 「没有完全匹配的」，前后两句打架。
+        filler = max(0, len(result.get("eligible", [])) - in_list)
+
         if in_list:
             note = f"你提到了{said}：库里符合的有 {in_list} 个，已经排在最前面。"
-            if len(result.get("eligible", [])) > in_list:
+            if filler:
                 note += "排在后面的不在这个范围内，是按时间和主题补上的。"
         elif anywhere:
             note = (
                 f"你提到了{said}：这个范围内有 {anywhere} 个项目，但都没能进正式推荐"
-                "（已截止，或关键字段还没核对完）。下面几条**不在**你要的范围里。"
+                "（已截止，或关键字段还没核对完）。"
             )
+            note += "下面几条**不在**你要的范围里。" if filler else ""
         else:
-            note = f"你提到了{said}：**库里目前一个都没有。**下面几条不在这个范围内，只满足其它条件。"
+            note = f"你提到了{said}：**库里目前一个都没有。**"
+            if filler:
+                note += "下面几条不在这个范围内，只满足其它条件。"
 
         blank = sum(
             1 for project in self._projects(include_expired=True)
@@ -1054,11 +1063,22 @@ class PracticeChatAdapter:
         for index, item in enumerate(result["eligible"][:5], 1):
             lines.extend(self._recommendation_card(index, item))
         if result["potential"]:
-            lines.append("\n## 潜在机会（需先复核）")
+            # 标题原来叫「潜在机会（需先复核）」，条目排版和正式推荐几乎一样，
+            # 实测里学生分不出来——一条 2036 年截止、没有原文链接的导入线索，
+            # 看起来跟真实招募没区别。这里改成把"这还不算数"写在最前面，
+            # 并且明确点出没有原文可查的那些。
+            lines.append("\n## 线索（尚未核实，不能作为报名依据）")
+            lines.append("下面这些是采集到但**还没核对完**的记录，字段可能有误，也可能根本不存在。")
             for item in result["potential"][:3]:
                 project = item["project"]
                 warnings = "；".join(item["warnings"][:2])
-                lines.append(f"- **{project['title']}**：{warnings}")
+                if project.get("source_url"):
+                    lines.append(f"- 线索待核验：**{project['title']}** — {warnings}")
+                else:
+                    lines.append(
+                        f"- 线索待核验：导入记录称有「{project['title']}」，"
+                        f"但**没有原文链接可查**，无法核实是否真实存在。{warnings}"
+                    )
         if result["excluded"]:
             lines.append(f"\n另有 {len(result['excluded'])} 个项目因截止、时间、资格或经费硬条件被排除。")
 
@@ -1968,6 +1988,10 @@ class PracticeChatAdapter:
         notes = ["已按你最新的说法重新筛了一遍。"]
         if excluded_terms:
             notes.append(f"我理解你想避开：{'、'.join(excluded_terms)}。")
+        elif profile.get("location_strict") or profile.get("strict"):
+            # 排他类的说法（「只要 X」「不要拿外地凑数」）不产生排除词，
+            # 但同样改变了筛选口径，得复述出来让用户能纠正。
+            notes.append(f"我理解到的条件是：{self._restrictions_said(profile)}。")
         notes.append(
             "如果我理解偏了，直接把完整条件再说一遍就行——比如"
             "「我大四，九月有空，想去西部，要有报销」。"

@@ -133,10 +133,11 @@ class OrdinalReferenceTests(unittest.TestCase):
         self.assertIn("宝庆微光", bound["title"])
 
     def test_potential_opportunities_are_not_numbered_targets(self):
-        """「潜在机会」是不带编号的 `- **标题**`，不该被「第 N 个」指到。"""
+        """线索区用的是不带编号的 `- **标题**`，不该被「第 N 个」指到。"""
         content = (
             "## 正式推荐\n\n1. **宝庆微光赴湖南新宁支教实践支队招募**\n   - 地点 湖南\n"
-            "\n## 潜在机会（需先复核）\n- **校团委宣传部学生骨干招募**：字段待核\n"
+            "\n## 线索（尚未核实，不能作为报名依据）\n"
+            "- 线索待核验：**校团委宣传部学生骨干招募** — 字段待核\n"
         )
         messages = [
             {"role": "user", "content": "推荐"},

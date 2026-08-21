@@ -487,11 +487,34 @@ def _is_lead_in(line: str) -> bool:
     return bool(tail) and tail.endswith(("：", ":")) and len(tail) <= 12
 
 
+# 「面向全校」既可能是"招谁"，也可能是"这个岗位服务谁"。
+#
+# 线上实测抓到的原文：「运营"我在清华听讲座"平台，面向全校同学提供一站式讲座
+# 信息交流与检索服务」——这是岗位职责，却因为含「面向全校」被 ELIGIBILITY_LOOSE
+# 捞成了参与资格，还顺带把 explicit_no_restriction 设成了 true。
+#
+# 判据：宽松线索只有在同一行里还能看出"这是在招人"时才作数。
+_ELIGIBILITY_AS_DUTY = ("负责", "运营", "承办", "开展", "对接", "维护", "统筹",
+                        "提供一站式", "工作内容", "岗位职责", "主要职责")
+_RECRUITING_VERBS = ("招募", "招收", "招新", "报名", "选拔", "欢迎", "诚邀", "纳新")
+
+
+def _find_eligibility_loose(lines: list[str]) -> str:
+    for line in lines:
+        if not any(keyword in line for keyword in ELIGIBILITY_LOOSE):
+            continue
+        if (any(term in line for term in _ELIGIBILITY_AS_DUTY)
+                and not any(verb in line for verb in _RECRUITING_VERBS)):
+            continue  # 是在描述这个岗位干什么，不是在说招谁
+        return line.strip()
+    return ""
+
+
 def _extract_eligibility(lines: list[str]) -> tuple[dict[str, Any], str]:
     # 分两轮找：先找带明确标签的行，找不到再退回宽松线索。
     # 不能一轮找完——_find_line 返回的是第一个命中行，而开场白往往排在
     # 真正的「参与资格：」那一行前面，一轮下来永远是套话赢。
-    line = _find_line(lines, ELIGIBILITY_LABELS) or _find_line(lines, ELIGIBILITY_LOOSE)
+    line = _find_line(lines, ELIGIBILITY_LABELS) or _find_eligibility_loose(lines)
     if line and (line in _ELIGIBILITY_HEADING_ONLY or _is_lead_in(line)):
         # 「报名要求：我们希望你是：」这类引导行本身没有信息，真正的条件在后面
         # 几行。真实数据里抽到过，还因为非空被当成已确认的资格说明显示出去。
@@ -514,9 +537,31 @@ def _extract_eligibility(lines: list[str]) -> tuple[dict[str, Any], str]:
     }, line
 
 
+# 「经费」两个字出现在岗位职责里的写法。这些是**要干的活**，不是**给的待遇**。
+#
+# 线上实测抓到的原文：「负责各类相关经费的报销和代发」——这是校团委宣传部
+# 学生骨干的岗位职责，却被读成"这个项目提供报销"，直接展示成「有经费支持」。
+# 学生看到会理解成"参加这个能报销"，正好反了。
+_REIMBURSEMENT_AS_DUTY = (
+    "负责", "承办", "协助办理", "代发", "审批", "审核", "统筹", "对接",
+    "办理报销", "报销工作", "报销流程", "财务", "预算编制", "台账",
+)
+# 反过来，这些写法明确指向参与者拿到什么。
+_REIMBURSEMENT_TO_PARTICIPANT = (
+    "提供", "给予", "补助", "补贴", "承担", "报销往返", "报销交通", "报销费用",
+    "食宿由", "交通由", "全额报销", "实报实销", "人均", "每人", "标准为",
+    "免费", "包食宿", "不收取", "自理",
+)
+
+
 def _extract_reimbursement(lines: list[str]) -> tuple[dict[str, Any], str]:
     line = _find_line(lines, ["报销", "补贴", "经费", "交通费", "食宿"])
     if not line:
+        return {"has_reimbursement": None, "ratio": None, "amount": None, "text": ""}, ""
+    # 是职责描述、又没有任何面向参与者的措辞，就当没抽到——宁可标成待确认，
+    # 也不能把「负责报销工作」说成「有经费支持」。
+    if (any(term in line for term in _REIMBURSEMENT_AS_DUTY)
+            and not any(term in line for term in _REIMBURSEMENT_TO_PARTICIPANT)):
         return {"has_reimbursement": None, "ratio": None, "amount": None, "text": ""}, ""
     negative = any(term in line for term in ["不报销", "无报销", "费用自理", "不提供补贴"])
     ratio_match = RATIO_RE.search(line)
@@ -648,6 +693,13 @@ def extract_project(raw_text: str, metadata: dict[str, Any] | None = None, *, to
         risk_notes.append("缺少原文链接，发布前需补充来源")
     if demo_data:
         risk_notes.append("演示数据，不可作为真实报名依据")
+    # 离谱的年份基本上意味着抽错了行，或者是导入时留下的脏数据。
+    # 实测里线上挂着一条「报名截止 2036-09-30」的记录，看起来跟真实招募没区别。
+    # 三年是个宽松的界：社会实践的报名周期以周计，跨年的都少见。
+    for label, value in (("报名截止", deadline), ("实践开始", practice_start)):
+        parsed = parse_iso_date(value)
+        if parsed and parsed.year - today.year > 3:
+            risk_notes.append(f"{label}日期是 {value}，距今超过三年——多半是抽取有误或脏数据，需人工核对")
 
     critical_present = 5 - sum(field in uncertain_fields for field in [
         "signup_deadline", "eligibility", "reimbursement", "signup_method", "source_url"

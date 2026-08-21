@@ -54,7 +54,7 @@ class ConstraintTests(unittest.TestCase):
     # ── 否定 ──────────────────────────────────────────────────────────
     def test_negated_term_is_actually_excluded(self):
         content = self.reply("推荐一些实践，不考虑学生骨干岗位").content
-        self.assertNotIn("学生骨干", content.split("## 潜在机会")[0])
+        self.assertNotIn("学生骨干", content.split("## 线索")[0])
 
     def test_negation_does_not_kill_the_positive_part_of_the_same_sentence(self):
         """「想去支教，不要学生骨干」——支教要保住，学生骨干要挡掉。"""
@@ -111,6 +111,19 @@ class ConstraintTests(unittest.TestCase):
     def test_strict_mode_does_not_offer_to_relax_on_its_own(self):
         content = self.reply("只要西藏的实践，没有合适就直接说没有").content
         self.assertIn("在你说之前我不会自己放", content)
+
+    def test_empty_result_does_not_promise_items_it_will_not_show(self):
+        """实测线上出现过前后两句打架：
+
+            > 你提到了「西藏」：库里目前一个都没有。下面几条不在这个范围内…
+            **没有完全匹配的。**你要求的是：只要西藏…
+
+        前一句承诺「下面几条」，后一句说一条都没有。自相矛盾比答不上来更伤。
+        """
+        content = self.reply("只要西藏的实践，没有合适就直接说没有").content
+        self.assertIn("没有完全匹配的", content)
+        for promise in ("下面几条", "排在后面的"):
+            self.assertNotIn(promise, content, f"空结果却承诺了「{promise}」：\n{content}")
 
 
 if __name__ == "__main__":
