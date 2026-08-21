@@ -397,6 +397,35 @@ def _split_clauses(text: str) -> list[str]:
     return [clause for clause in _CLAUSE_SPLIT_RE.split(text) if clause.strip()]
 
 
+# ── 「改上一份」──────────────────────────────────────────────────────────
+#
+# 100 轮实测里，用户只是要求修改刚拿到的那份材料，却经常被按关键词重新分类：
+#
+#   「加入两个比较维度」 → 跳成单项目详情（"比较"被 _COMPARE_RE 抢走）
+#   「压缩到 120 字」    → 跳成推荐列表
+#   「不要用常识补充」   → 跳成重新筛选
+#   「加入未成年人保护」 → 跳成校园讲解志愿者推文
+#
+# 路由器只看当前这一句有什么词，不看"现在正在干什么"。
+_REVISION_WORDS = (
+    "加上", "加入", "添上", "补上", "补充一下", "去掉", "删掉", "拿掉", "删去",
+    "改成", "换成", "改为", "压缩到", "精简到", "缩到", "缩短", "扩到", "展开",
+    "再短", "再长", "短一点", "长一点", "详细一点", "简单一点",
+    "别用", "不要用", "换个语气", "更口语", "更正式", "语气", "重写", "再来一版",
+    "换一版", "调整", "改一改", "改得", "再改",
+)
+# 超过这个长度的多半是贴了一段新文稿要润色，不是在指挥改上一份。
+_MAX_REVISION_INSTRUCTION = 60
+
+# 规则生成的结构化回复的指纹。命中任何一条就说明上一条不是可改的草稿，
+# 而是推荐列表 / 项目卡 / 比较表这类东西——那种情况下「换成湖南的」是
+# 在改筛选条件，不是在改稿子。
+_STRUCTURED_REPLY_MARKERS = (
+    "## 正式推荐", "## 这次是怎么排的", "## 线索（尚未核实", "## 项目库总览",
+    "- 状态：", "个项目都对得上", "这句我没接住", "潜在机会",
+)
+
+
 # 指代词。「它」要排除「其它/其他」里的那个字。
 _DEICTIC_RE = re.compile(
     r"这个项目|那个项目|该项目|这一个|这条|这个|上面那个|刚才那个|刚才那条|上述|(?<!其)它"
@@ -571,6 +600,12 @@ class PracticeChatAdapter:
         # 贴一段文字要求润色/点评。必须排在最前面：这类消息往往很长，里面随便
         # 一个词都可能模糊命中某个项目标题——实测「你看看我这个开头写得怎么样：
         # 盛夏的七月，我们踏上了前往西部的列车」被匹配成了某个项目的详情页。
+        # 「改上一份」必须排在所有按关键词分类的分支之前——「加入两个比较维度」
+        # 里的"比较"、「压缩到120字」里的"推荐"，都会被下面的词表抢走。
+        # 它只在上一条回复确实是一份可改的草稿时才成立，所以不会把
+        # 「换成湖南的」这种改筛选条件的话误接过来。
+        if self._is_revision_request(latest, messages):
+            return self._revise_previous(messages, latest)
         if self._is_polish_request(latest):
             return self._polish_text(latest)
         # 「为什么推荐不在京津冀的？是库里没有吗」——这句里有"推荐"，以前被
@@ -872,6 +907,61 @@ class PracticeChatAdapter:
             if span:
                 profile["available_start"], profile["available_end"] = span
         return profile
+
+    @staticmethod
+    def _last_draft(messages: list[dict[str, Any]]) -> str:
+        """上一条 assistant 回复，且它得是一份可改的草稿。
+
+        推荐列表、项目卡、比较表这些是规则拼出来的，改它们没有意义——
+        用户说「换成湖南的」时想改的是筛选条件，不是那段文字。所以只有
+        自由文本（模型生成的报名理由、访谈提纲、推送稿…）才算草稿。
+        """
+        for item in reversed(messages):
+            if item.get("role") != "assistant":
+                continue
+            content = (item.get("content") or "").strip()
+            if not content:
+                return ""
+            if any(marker in content for marker in _STRUCTURED_REPLY_MARKERS):
+                return ""
+            return content
+        return ""
+
+    def _is_revision_request(self, latest: str, messages: list[dict[str, Any]]) -> bool:
+        if len(latest) > _MAX_REVISION_INSTRUCTION:
+            return False  # 这么长多半是贴了一段新文稿，那是润色不是改上一份
+        if not any(word in latest for word in _REVISION_WORDS):
+            return False
+        return bool(self._last_draft(messages))
+
+    def _revise_previous(self, messages: list[dict[str, Any]], latest: str) -> ChatResult:
+        """按用户的指令改上一份输出，而不是重新分类成另一个任务。"""
+        draft = self._last_draft(messages)
+        if not llm.is_enabled():
+            return ChatResult(
+                "当前没有配置写作模型，改不了稿。你要的调整是"
+                f"「{latest[:40]}」——可以自己在上一份基础上动手，"
+                "需要我按结构给建议的话说一声。",
+                "revise_degraded",
+            )
+        system_prompt = (
+            "你在按用户的指令修改**你上一轮给出的稿子**。\n\n"
+            "**只按指令改，不做别的**：用户没让你动的段落保持原样，不要顺手重写整篇。\n"
+            "**不许新增事实**：稿子里没有的时间、地点、人数、联系方式、经历、能力、"
+            "满意度数字，一个字都不要加。用户要求加入某项内容而稿子里没有依据时，"
+            "写成待补的占位（比如「（此处填写你的相关经历）」），并在末尾说明这一处需要他自己补。\n"
+            "如果指令本身要求写入无法核实的信息，直接说明哪一项不能替他写、为什么。\n"
+            "有字数要求就严格照做。\n\n"
+            "先给改好的完整稿子，再用两到四条说明改了什么。用中文。"
+        )
+        try:
+            body = llm.complete(system_prompt, f"修改指令：{latest}\n\n上一版稿子：\n{draft}")
+        except llm.LLMUnavailable:
+            return ChatResult("写作模型暂时不可用，稍后再试。上一版稿子还在上面，可以先照着改。",
+                              "revise_degraded")
+        if not body.strip():
+            return ChatResult("这次没改出更好的版本，把要求说得更具体些再试一次？", "revise_degraded")
+        return ChatResult(body.strip(), "revise")
 
     def _is_why_question(self, latest: str, user_messages: list[str]) -> bool:
         """这句是在追问推荐依据，而不是发起一次新的推荐。
