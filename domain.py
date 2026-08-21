@@ -487,25 +487,37 @@ def _is_lead_in(line: str) -> bool:
     return bool(tail) and tail.endswith(("：", ":")) and len(tail) <= 12
 
 
-# 「面向全校」既可能是"招谁"，也可能是"这个岗位服务谁"。
+# 「面向全校」既可能是"招谁"，也可能是"这个岗位服务谁"。三条线上真实原文：
 #
-# 线上实测抓到的原文：「运营"我在清华听讲座"平台，面向全校同学提供一站式讲座
-# 信息交流与检索服务」——这是岗位职责，却因为含「面向全校」被 ELIGIBILITY_LOOSE
-# 捞成了参与资格，还顺带把 explicit_no_restriction 设成了 true。
+#   ① 运营“我在清华听讲座”平台，面向全校同学提供一站式讲座信息交流与检索服务
+#      → 岗位职责。却因为含「面向全校」被捞成参与资格，还把 explicit_no_restriction
+#        设成了 true。
+#   ② “星空计划”面向全校社团会长及优秀骨干，匹配全方位资源，开展为期一年的系统培养
+#      → 这才是真的资格说明。
+#   ③ 我们是社团运行的“数字大脑”，负责规划、建设并持续运营全校学生社团的一站式信息平台
+#      → 岗位职责。「全校学生」其实是「全校学生社团」的一部分，说的是平台服务谁。
 #
-# 判据：宽松线索只有在同一行里还能看出"这是在招人"时才作数。
+# 第一版规则是"整行里有职责词、又没有招募词就跳过"，结果两个方向都错：
+# ② 因为有「开展」被误杀，③ 因为段尾出现「欢迎」而逃过。
+#
+# 真正的判据是**位置**：职责词出现在宽松关键词之前，说明这一行的主语是岗位在
+# 做什么，「面向全校」只是它的宾语；出现在之后则不影响前半句"招谁"的语义。
+# 一条规则同时管住这三种。
 _ELIGIBILITY_AS_DUTY = ("负责", "运营", "承办", "开展", "对接", "维护", "统筹",
-                        "提供一站式", "工作内容", "岗位职责", "主要职责")
-_RECRUITING_VERBS = ("招募", "招收", "招新", "报名", "选拔", "欢迎", "诚邀", "纳新")
+                        "建设", "规划", "工作内容", "岗位职责", "主要职责")
 
 
 def _find_eligibility_loose(lines: list[str]) -> str:
     for line in lines:
-        if not any(keyword in line for keyword in ELIGIBILITY_LOOSE):
+        hits = [line.find(keyword) for keyword in ELIGIBILITY_LOOSE if keyword in line]
+        if not hits:
             continue
-        if (any(term in line for term in _ELIGIBILITY_AS_DUTY)
-                and not any(verb in line for verb in _RECRUITING_VERBS)):
-            continue  # 是在描述这个岗位干什么，不是在说招谁
+        first_hint = min(hits)
+        duty_before = any(
+            0 <= line.find(term) < first_hint for term in _ELIGIBILITY_AS_DUTY
+        )
+        if duty_before:
+            continue  # 这一行在说岗位干什么，「面向全校」是它的宾语
         return line.strip()
     return ""
 

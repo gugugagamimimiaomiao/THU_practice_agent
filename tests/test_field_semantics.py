@@ -85,6 +85,24 @@ class EligibilitySemanticsTests(unittest.TestCase):
         result, _ = _extract_eligibility(lines)
         self.assertIn("本科生", result["restriction_text"])
 
+    def test_duty_word_after_the_hint_does_not_disqualify_the_line(self):
+        """判据是位置，不是"有没有职责词"。
+
+        第一版规则写成"整行里有职责词、又没有招募词就跳过"，在真实数据上
+        两个方向都错了：
+
+          「"星空计划"面向全校社团会长及优秀骨干，…开展为期一年的系统培养」
+              → 因为句尾有「开展」被误杀，而这是真正的资格说明
+          「…负责规划、建设并持续运营全校学生社团的一站式信息平台。欢迎加入」
+              → 因为段尾出现「欢迎」而逃过，而这是岗位职责
+
+        职责词在关键词之前 = 这一行在说岗位干什么；在之后 = 不影响前半句。
+        """
+        kept = "“星空计划”面向全校社团会长及优秀骨干，匹配全方位资源，开展为期一年的系统培养"
+        skipped = "我们是社团运行的“数字大脑”，负责规划、建设并持续运营全校学生社团的一站式信息平台。欢迎加入"
+        self.assertTrue(_extract_eligibility([kept])[0]["restriction_text"])
+        self.assertFalse(_extract_eligibility([skipped])[0]["restriction_text"])
+
 
 if __name__ == "__main__":
     unittest.main()
