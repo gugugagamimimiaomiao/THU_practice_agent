@@ -830,8 +830,32 @@ def score_project(project: dict[str, Any], profile: dict[str, Any], *, today: da
     elif not preferred_themes:
         score += 12
 
+    # ── 显式排他：用户说了"不要 X""只要 Y"，这是指令不是偏好 ──────────────
+    #
+    # 原来地点、主题一律只是加减分，于是「不考虑学生骨干岗位」之后系统照样
+    # 只列学生骨干岗位，「不要拿外地项目凑数」之后照样返回外地项目。
+    # 显式否定必须一票否决，哪怕结果为空——空结果是正确答案，凑数不是。
+    haystack = " ".join([
+        str(project.get("title", "")), str(project.get("summary", "")),
+        project_location_text(project),
+    ])
+    for term in _as_set(profile.get("excluded_terms")):
+        if term in haystack:
+            excluded.append(f"你说了不要「{term}」这类")
+            break
+    for place in _as_set(profile.get("excluded_locations")):
+        if place in project_location_text(project):
+            excluded.append(f"你说了不去{place}")
+            break
+    banned_themes = _as_set(profile.get("excluded_themes")) & _as_set(project.get("theme_tags"))
+    if banned_themes:
+        excluded.append(f"你说了不做{'、'.join(sorted(banned_themes))}这类")
+
     preferred_locations = _as_set(profile.get("preferred_locations"))
     location_text = project_location_text(project)
+    if profile.get("location_strict") and preferred_locations:
+        if not any(place in location_text for place in preferred_locations):
+            excluded.append("不在你指定的地区范围内")
     matched_locations = {place for place in preferred_locations if place in location_text}
     location_match = bool(matched_locations)
     if matched_locations:

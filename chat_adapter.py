@@ -354,6 +354,55 @@ CORPUS_STATS_HINTS = (
     "收录了多少", "有多少篇", "数据量", "样本量", "语料",
 )
 
+# ── 会话状态：从 messages 里确定性地还原，而不是拼接全文去猜 ──────────────
+#
+# 平台每轮都把完整历史（含 assistant 消息）发过来，但 reply() 原来只挑 user
+# 消息，自己说过的话全丢了。100 轮实测暴露出的串线、条件累计、指代失效，
+# 根子都在这里。
+#
+# 还原的依据就是我自己写出去的那段文字：推荐卡是「1. **标题**」，详情页是
+# 「## 标题」，标题都原样输出，按标题回查就能拿回项目对象。不引入隐藏标记，
+# 因为那要赌平台不会把它渲染出来或者洗掉。
+_LISTED_RE = re.compile(r"^\s{0,3}(\d{1,2})\.\s+\*\*(.+?)\*\*", re.M)
+_DETAIL_HEAD_RE = re.compile(r"^##\s+(.+?)\s*$", re.M)
+
+_CN_NUMERALS = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
+                "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+_ORDINAL_RE = re.compile(r"第\s*([一二两三四五六七八九十]|\d{1,2})\s*(?:个|条|项|款|名)?")
+
+# ── 否定与排他 ──────────────────────────────────────────────────────────
+#
+# 抽取器原来完全没有否定处理，于是「不考虑学生骨干岗位」这句话里的
+# 「学生骨干」反而成了正向关键词——100 轮实测里，用户明确说不考虑之后，
+# 系统只列出五个学生骨干岗位。那不是巧合，是必然。
+#
+# 处理方式是按小句切分：带否定词的小句里抽到的东西进排除表，不进偏好表。
+# 不做句法分析，因为中文口语里否定的辖域本来就靠标点和语序，切小句已经
+# 覆盖了绝大多数写法（「想去支教，不要学生骨干」「除了北京都行」）。
+_NEGATION_LEADS = (
+    "不要", "不想", "不考虑", "不用", "别推", "别给", "别拿", "除了", "排除",
+    "不接受", "不去", "不做", "不看", "不感兴趣", "不是", "非",
+)
+# 排他：这类说法是把偏好升级成硬条件，允许空结果。
+_EXCLUSIVE_LEADS = ("只要", "只看", "只考虑", "仅限", "必须是", "必须在", "只想", "就要", "仅")
+# 用户明确表态"宁可没有也别凑数"。这时空结果就是正确答案。
+_STRICT_HINTS = (
+    "没有就直接说", "没有就说没有", "没有合适就直接说", "没有合适就说",
+    "不要凑数", "别凑数", "不用凑", "不要补位", "宁可没有", "凑数",
+)
+_CLAUSE_SPLIT_RE = re.compile(r"[，,。；;！!？?、\n]+")
+
+
+def _split_clauses(text: str) -> list[str]:
+    return [clause for clause in _CLAUSE_SPLIT_RE.split(text) if clause.strip()]
+
+
+# 指代词。「它」要排除「其它/其他」里的那个字。
+_DEICTIC_RE = re.compile(
+    r"这个项目|那个项目|该项目|这一个|这条|这个|上面那个|刚才那个|刚才那条|上述|(?<!其)它"
+)
+
+
 # 追问推荐依据的问法。故意不收「怎么样」——那是润色请求的词，
 # 也不收裸的「依据」——「报名依据」是另一回事。
 _WHY_RE = re.compile(
@@ -528,7 +577,7 @@ class PracticeChatAdapter:
         # RECOMMEND_WORDS 接走，把同一份列表原样重跑一遍，等于答非所问。
         # 追问推荐依据是评委最可能问的一句，必须单独接住。
         if self._is_why_question(latest, user_messages):
-            return self._explain_recommendation(all_user_text)
+            return self._explain_recommendation(user_messages)
         # 对已采集数据的统计性提问。同样要排在项目匹配之前——「实践招募一般
         # 什么时候发布」里的"实践招募"会模糊命中一堆标题，变成项目候选列表。
         if any(word in latest for word in CORPUS_STATS_HINTS) and not self._mentions_project_exactly(latest):
@@ -552,12 +601,12 @@ class PracticeChatAdapter:
         if _COMPARE_RE.search(latest):
             return self._compare(messages, all_user_text)
         if any(word in latest for word in RECOMMEND_WORDS):
-            return self._recommend(all_user_text)
+            return self._recommend(user_messages)
         # 条件筛选：「有没有校内的志愿服务」「只看志愿服务」。必须排在项目匹配
         # 之前——否则句子里的"志愿服务"会模糊命中某个标题，变成查那一个项目。
         # 但用户完整点名某个项目时（「宝庆微光有吗」）仍然按查详情处理。
         if any(word in latest for word in FILTER_WORDS) and not self._mentions_project_exactly(latest):
-            return self._recommend(all_user_text)
+            return self._recommend(user_messages)
         project = self._resolve_project(messages, latest)
         if project and any(word in latest for word in DETAIL_WORDS):
             return ChatResult(self._project_detail(project), "project_detail", project["id"])
@@ -597,7 +646,7 @@ class PracticeChatAdapter:
         except llm.LLMUnavailable:
             return None  # 模型不可用就照常掉兜底，不把外部故障变成用户可见的错误
         if intent == "recommend":
-            return self._recommend(all_user_text)
+            return self._recommend(self._user_texts(messages))
         if intent == "list":
             return ChatResult(self._list_projects(), "list_projects")
         if intent == "compare":
@@ -684,6 +733,86 @@ class PracticeChatAdapter:
         )
         return ChatResult(content, "import", project["id"])
 
+    # 一个片段在多大比例的标题里出现，就算"太泛"不能拿来排除。
+    # 「招募」出现在几乎所有标题里，拿它当排除条件会清空整个库。
+    _TERM_TOO_GENERIC = 0.4
+
+    # 这些是这个领域的结构词，不是用户的偏好。
+    #
+    # 实测踩到的：「不要拿外地项目凑数」抽出来的排除词是「项目」——比例判据
+    # 没拦住它（库里只有部分标题带「项目」两个字），但拿它去排除等于误伤一大片。
+    # 用户说这句话时想表达的是"别用不符合地域的来补位"，跟"项目"这个词无关。
+    _TERM_STOPWORDS = frozenset({
+        "项目", "实践", "招募", "活动", "支队", "推荐", "报名", "同学",
+        "学生", "工作", "计划", "通知", "开展", "参加", "地方", "东西",
+    })
+
+    def _terms_worth_excluding(self, text: str) -> list[str]:
+        """从否定小句里挑出能真正落到项目上的片段。
+
+        为什么不用固定词表：用户说「不考虑学生骨干岗位」，排除的应该是
+        「学生骨干」；说「不要支教」排除的是「支教」——这些词事先列不完。
+        所以反过来做：拿这句话里所有 2~6 字的片段去比对真实标题，
+        留下确实能命中、又不至于命中所有标题的那些。判据完全来自库里的
+        真实数据，不靠猜。
+        """
+        titles = [project.get("title", "") for project in self._projects(include_expired=True)]
+        if not titles:
+            return []
+        cleaned = re.sub(r"[^一-鿿A-Za-z0-9]", "", text)
+        for lead in _NEGATION_LEADS:
+            cleaned = cleaned.replace(lead, "")
+        # 「不要拿外地的凑数」表达的是"别补位"，不是"排除某个词"。
+        # 这类整句先剥掉，免得从里面挖出无关的片段来。
+        for hint in _STRICT_HINTS + ("凑", "补位", "外地", "外省"):
+            cleaned = cleaned.replace(hint, "")
+        hits: list[str] = []
+        for size in range(6, 1, -1):
+            for start in range(len(cleaned) - size + 1):
+                token = cleaned[start:start + size]
+                if token in self._TERM_STOPWORDS:
+                    continue
+                if any(token in existing for existing in hits):
+                    continue  # 已经被更长的命中覆盖了
+                matched = sum(1 for title in titles if token in title)
+                if matched and matched / len(titles) <= self._TERM_TOO_GENERIC:
+                    hits.append(token)
+        return hits
+
+    def _profile_from_turns(self, user_messages: list[str]) -> dict[str, Any]:
+        """按轮次抽条件，后一轮覆盖前一轮同类条件。
+
+        原来是把所有用户消息拼成一坨丢给 _extract_profile。100 轮实测里的后果：
+        用户先说「京津冀」，后来改成「湖南」，系统理解成"京津冀、湖南都要"——
+        因为拼接文本里两个地名都在，没有先后之分。
+
+        规则：某一轮说了某类条件，就整体替换该类条件；这一轮没提的，沿用之前的。
+        排除项累加（用户是在一条条加限制），但如果后面某轮又正向提到了同一个词，
+        就把它从排除表里拿掉——那是用户改主意了。
+        """
+        merged = self._extract_profile("")
+        for text in user_messages:
+            turn = self._extract_profile(text)
+            for field in ("department", "grade", "themes", "preferred_locations",
+                          "location_labels", "available_start", "available_end"):
+                if turn[field]:
+                    merged[field] = turn[field]
+            if turn["reimbursement_preference"] != "not_important":
+                merged["reimbursement_preference"] = turn["reimbursement_preference"]
+            for field in ("excluded_locations", "excluded_themes", "excluded_terms"):
+                merged[field] = list(dict.fromkeys(merged[field] + turn[field]))
+            for flag in ("location_strict", "strict"):
+                merged[flag] = merged[flag] or turn[flag]
+            # 后来又正向提到的，从排除表里撤掉。
+            merged["excluded_locations"] = [
+                item for item in merged["excluded_locations"]
+                if item not in merged["preferred_locations"]
+            ]
+            merged["excluded_themes"] = [
+                item for item in merged["excluded_themes"] if item not in merged["themes"]
+            ]
+        return merged
+
     def _extract_profile(self, text: str) -> dict[str, Any]:
         profile: dict[str, Any] = {
             "department": "",
@@ -693,8 +822,38 @@ class PracticeChatAdapter:
             "themes": [],
             "preferred_locations": [],
             "location_labels": [],
+            "excluded_locations": [],
+            "excluded_themes": [],
+            "excluded_terms": [],
+            "location_strict": False,
+            "strict": False,
             "reimbursement_preference": "not_important",
         }
+        original = text
+        # 带否定词的小句单独拎出来：里面的地名、主题进排除表，不进偏好表。
+        negative_clauses = [c for c in _split_clauses(text)
+                            if any(word in c for word in _NEGATION_LEADS)]
+        if negative_clauses:
+            joined = "，".join(negative_clauses)
+            _, profile["excluded_locations"] = expand_location_query(joined)
+            profile["excluded_themes"] = [
+                theme for theme, words in THEME_KEYWORDS.items()
+                if theme in joined or any(word.lower() in joined.lower() for word in words)
+            ]
+            profile["excluded_terms"] = self._terms_worth_excluding(joined)
+            # 否定小句里的词不能再当成正向偏好，所以后面只看剩下的部分。
+            text = "，".join(c for c in _split_clauses(text) if c not in negative_clauses)
+        profile["location_strict"] = any(
+            lead in clause and expand_location_query(clause)[1]
+            for clause in _split_clauses(text) for lead in _EXCLUSIVE_LEADS
+        ) or any(word in original for word in ("外地", "外省"))  # 「不要外地的」= 地域升级成硬条件
+        # 「不要凑数」本身就是个否定小句，上面会被剥掉，所以这里必须看原文。
+        profile["strict"] = (
+            any(hint in original for hint in _STRICT_HINTS)
+            or bool(profile["excluded_terms"] or profile["excluded_locations"]
+                    or profile["excluded_themes"])
+            or profile["location_strict"]
+        )
         profile["department"] = next((item for item in KNOWN_DEPARTMENTS if item in text), "")
         profile["grade"] = next((item for item in GRADE_TERMS if item in text), "")
         profile["themes"] = [theme for theme, words in THEME_KEYWORDS.items() if theme in text or any(word.lower() in text.lower() for word in words)]
@@ -730,13 +889,13 @@ class PracticeChatAdapter:
             word in prior for word in RECOMMEND_WORDS + FILTER_WORDS
         )
 
-    def _explain_recommendation(self, all_user_text: str) -> ChatResult:
+    def _explain_recommendation(self, user_messages: list[str]) -> ChatResult:
         """把这次排序的依据摊开讲：读到了什么条件、地点满足没满足、分怎么给的。
 
         这段刻意全部用当次的真实数字，不写通用套话——「库里符合京津冀的有 4 个」
         是可以被当场证伪的，「我们会综合考虑地域因素」不是。
         """
-        profile = self._extract_profile(all_user_text)
+        profile = self._profile_from_turns(user_messages)
         result = recommend_projects(self._projects(include_expired=True), profile)
         lines = ["## 这次是怎么排的"]
 
@@ -843,8 +1002,26 @@ class PracticeChatAdapter:
             note += f"另有 {blank} 个项目的原文没写明地点，无法判断在不在范围内。"
         return note
 
-    def _recommend(self, text: str) -> ChatResult:
-        profile = self._extract_profile(text)
+    @staticmethod
+    def _restrictions_said(profile: dict[str, Any]) -> str:
+        """把这次的硬条件复述成人话，让用户能当场纠正我理解错的地方。"""
+        parts: list[str] = []
+        if profile.get("location_strict") and profile.get("location_labels"):
+            parts.append(f"只要{'、'.join(profile['location_labels'])}")
+        elif profile.get("location_labels"):
+            parts.append("、".join(profile["location_labels"]))
+        for label, field in (("不去", "excluded_locations"), ("不做", "excluded_themes"),
+                             ("不要", "excluded_terms")):
+            if profile.get(field):
+                parts.append(f"{label}{'、'.join(profile[field])}")
+        if profile.get("themes"):
+            parts.append("、".join(profile["themes"]))
+        if profile.get("available_start"):
+            parts.append(f"{profile['available_start']} 到 {profile['available_end']} 有空")
+        return "；".join(parts) or "你刚才说的那些条件"
+
+    def _recommend(self, user_messages: list[str]) -> ChatResult:
+        profile = self._profile_from_turns(user_messages)
         result = recommend_projects(self._projects(include_expired=True), profile)
         lines = ["## 正式推荐"]
         note = self._location_note(profile, result)
@@ -857,13 +1034,23 @@ class PracticeChatAdapter:
             for item in result["excluded"][:6]:
                 blockers.extend(item.get("excluded_reasons", []))
             top = "；".join(dict.fromkeys(blockers))[:120]
-            lines.append("按你给的条件，暂时没有同时满足硬条件且已核验的项目。")
-            if top:
-                lines.append(f"\n主要卡在：{top}")
-            lines.append(
-                "\n可以试着放宽一个条件——比如换个时间段、去掉地点限制，"
-                "或者说「还有哪些实践机会」看全部在招项目。"
-            )
+            if profile.get("strict"):
+                # 用户明确说了"只要 X""不要 Y""没有就直说"。这时空结果就是
+                # 正确答案，不能再拿别的凑——实测里系统在这种时候反而输出了
+                # 整个项目库，等于把用户的话当没听见。
+                said = self._restrictions_said(profile)
+                lines.append(f"**没有完全匹配的。**你要求的是：{said}，库里现在没有同时满足这些条件的项目。")
+                if top:
+                    lines.append(f"\n卡在：{top}")
+                lines.append("\n要我放宽哪一条，你说了我再筛——在你说之前我不会自己放。")
+            else:
+                lines.append("按你给的条件，暂时没有同时满足硬条件且已核验的项目。")
+                if top:
+                    lines.append(f"\n主要卡在：{top}")
+                lines.append(
+                    "\n可以试着放宽一个条件——比如换个时间段、去掉地点限制，"
+                    "或者说「还有哪些实践机会」看全部在招项目。"
+                )
         for index, item in enumerate(result["eligible"][:5], 1):
             lines.extend(self._recommendation_card(index, item))
         if result["potential"]:
@@ -975,6 +1162,51 @@ class PracticeChatAdapter:
         scored.sort(key=lambda item: (-item[0], -item[1]))
         return [project for _run, _idx, project in scored[:limit]]
 
+    def _title_index(self) -> dict[str, dict[str, Any]]:
+        return {project["title"]: project for project in self._projects(include_expired=True)}
+
+    def _shown_list(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """还原用户最近一次看到的那份编号列表，按屏幕上的顺序。
+
+        依据是我自己写出去的那段文字——推荐卡的格式就是「1. **标题**」，
+        标题原样输出，按标题回查就能拿回项目。
+
+        「潜在机会」用的是不带编号的「- **标题**」，所以「第 N 个」不会指到
+        那里去，这跟用户的直觉一致。
+        """
+        by_title = self._title_index()
+        for item in reversed(messages):
+            if item.get("role") != "assistant":
+                continue
+            found = [
+                by_title[match.group(2).strip()]
+                for match in _LISTED_RE.finditer(item.get("content") or "")
+                if match.group(2).strip() in by_title
+            ]
+            if found:
+                return found
+        return []
+
+    def _last_detailed(self, messages: list[dict[str, Any]]) -> dict[str, Any] | None:
+        """最近一次展开过详情页的项目。详情页的头一行是「## 标题」。"""
+        by_title = self._title_index()
+        for item in reversed(messages):
+            if item.get("role") != "assistant":
+                continue
+            for match in _DETAIL_HEAD_RE.finditer(item.get("content") or ""):
+                title = match.group(1).strip()
+                if title in by_title:
+                    return by_title[title]
+        return None
+
+    @staticmethod
+    def _ordinal_in(text: str) -> int | None:
+        match = _ORDINAL_RE.search(text)
+        if not match:
+            return None
+        token = match.group(1)
+        return _CN_NUMERALS.get(token) or (int(token) if token.isdigit() else None)
+
     def _resolve_project(
         self, messages: list[dict[str, Any]], latest: str, *,
         latest_only: bool = False, loose: bool | None = None,
@@ -983,6 +1215,34 @@ class PracticeChatAdapter:
         direct = [project for project in projects if project["title"] in latest or project["id"] in latest]
         if direct:
             return direct[0]
+
+        # 「第一个」「第二项」只认用户刚看到的那份列表，认不出就返回 None
+        # 让调用方去问——绝不往下掉进模糊匹配。
+        #
+        # 100 轮实测里最严重的一次串线就出在这里：第 96 轮推荐了春山和宝庆，
+        # 第 97 轮说「给第一项生成报名风险清单」，系统绑到了宣传部学生骨干，
+        # 之后 98、99 轮继续错下去，第 100 轮问「是不是串线了」还掉了兜底。
+        # 原因是旧代码拿 `[p for p in projects if p["title"] in conversation]`
+        # 当候选，那是**数据库顺序**——「第一个」等于"历史上出现过的项目里在库里
+        # 排最前的那个"，跟屏幕上的顺序毫无关系。
+        # 给错项目写材料比答不上来严重得多，所以这里宁可返回 None。
+        if not latest_only:
+            ordinal = self._ordinal_in(latest)
+            if ordinal is not None:
+                shown = self._shown_list(messages)
+                return shown[ordinal - 1] if 1 <= ordinal <= len(shown) else None
+
+            # 「这个项目」「它」这类指代同样要排在模糊匹配前面。
+            # 实测过一次：「帮我写这个项目的报名理由」里的"项目"两个字，
+            # 被模糊匹配命中了标题里含「项目」的另一条记录——指代词本身
+            # 成了匹配依据，指到了一个用户根本没看过的项目上。
+            if _DEICTIC_RE.search(latest):
+                anchored = self._last_detailed(messages)
+                if anchored:
+                    return anchored
+                shown = self._shown_list(messages)
+                if len(shown) == 1:
+                    return shown[0]
 
         # 模糊匹配：只有当最相关的那个明显强于第二名时才认定，
         # 否则宁可让调用方列出候选让用户挑，也不猜错项目。
@@ -997,13 +1257,15 @@ class PracticeChatAdapter:
 
         if latest_only:
             return None
-        conversation = "\n".join(item["content"] for item in messages)
-        mentioned = [project for project in projects if project["title"] in conversation or project["id"] in conversation]
-        if mentioned:
-            if any(word in latest for word in ["第二个", "第2个"]) and len(mentioned) >= 2:
-                return mentioned[1]
-            return mentioned[0]
-        return None
+        # 「它」「这个项目」「刚才那个」这类指代：认最近展开过详情的那一个，
+        # 其次认列表里只有一条的情况。列表有好几条又没说是哪条，就返回 None
+        # 让调用方问一句——原来这里返回 mentioned[0]（数据库顺序里的头一个），
+        # 那是在猜，而且猜错时用户看不出来。
+        detailed = self._last_detailed(messages)
+        if detailed:
+            return detailed
+        shown = self._shown_list(messages)
+        return shown[0] if len(shown) == 1 else None
 
     def _pick_one_of(self, candidates: list[dict[str, Any]], purpose: str) -> str:
         """有多个同样像的项目时，把候选摆出来让用户挑，而不是替他猜一个。"""
@@ -1669,9 +1931,14 @@ class PracticeChatAdapter:
             "说出它标题里能区分的几个字即可。"
         )
 
+    @staticmethod
+    def _user_texts(messages: list[dict[str, Any]]) -> list[str]:
+        return [item["content"].strip() for item in messages
+                if item.get("role") == "user" and item.get("content", "").strip()]
+
     def _help_decide(self, messages: list[dict[str, Any]], all_user_text: str, latest: str) -> ChatResult:
         """「帮我参谋一下」「哪个更容易被选上」——用户要的是判断依据，不是清单。"""
-        result = self._recommend(all_user_text)
+        result = self._recommend(self._user_texts(messages))
         addition = (
             "\n\n---\n\n**怎么挑，我的建议**\n"
             "- **先看硬条件**：报名截止是否来得及、时间和你的安排冲不冲、资格限制符不符——这几条不满足，再喜欢也没用\n"
@@ -1690,17 +1957,17 @@ class PracticeChatAdapter:
         历史一起重新抽取偏好、重新推荐，并明确说出我理解到的排除项——
         理解错了用户能马上纠正，比默默猜一个结果强。
         """
-        excluded_terms = []
-        for term in KNOWN_LOCATIONS + list(THEME_KEYWORDS.keys()):
-            for marker in ("不要", "不想", "别推荐", "除了"):
-                if f"{marker}{term}" in latest:
-                    excluded_terms.append(term)
-                    break
+        # 排除项的抽取统一交给 _extract_profile 的否定小句逻辑，这里只负责复述，
+        # 不再维护第二套「不要+词表」的拼接规则——两套规则迟早会不一致。
+        profile = self._profile_from_turns(self._user_texts(messages))
+        excluded_terms = list(dict.fromkeys(
+            profile["excluded_locations"] + profile["excluded_themes"] + profile["excluded_terms"]
+        ))
 
-        result = self._recommend(all_user_text)
+        result = self._recommend(self._user_texts(messages))
         notes = ["已按你最新的说法重新筛了一遍。"]
         if excluded_terms:
-            notes.append(f"我理解你想避开：{'、'.join(dict.fromkeys(excluded_terms))}。")
+            notes.append(f"我理解你想避开：{'、'.join(excluded_terms)}。")
         notes.append(
             "如果我理解偏了，直接把完整条件再说一遍就行——比如"
             "「我大四，九月有空，想去西部，要有报销」。"
