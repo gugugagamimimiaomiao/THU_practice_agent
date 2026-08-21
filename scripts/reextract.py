@@ -180,6 +180,10 @@ def describe(project: dict, field: str) -> str:
         return (project.get("eligibility") or {}).get("restriction_text") or "(空)"
     if field == "location":
         return (project.get("location") or {}).get("detail") or "(空)"
+    if field == "reimbursement":
+        has = (project.get("reimbursement") or {}).get("has_reimbursement")
+        label = {True: "有", False: "无", None: "未写明"}[has]
+        return f"{label}｜{(project.get('reimbursement') or {}).get('text', '')[:30]}"
     return str(project.get(field) or "(空)")
 
 
@@ -274,8 +278,12 @@ def main() -> int:
             if note not in fresh.get("risk_notes", []):
                 fresh["risk_notes"] = list(fresh.get("risk_notes", [])) + [note]
 
+        # reimbursement 以前不在比对里，后果不只是"看不到变化"——下面
+        # `if not diffs: continue` 会连写库一起跳过。2026-08-21 修了经费误抽
+        # 之后跑 --apply，有五条项目的错误值原样留在库里，就是因为它们只有
+        # 经费字段变了。凡是会影响判断的字段都得进这张表。
         diffs = [(f, describe(project, f), describe(fresh, f))
-                 for f in WATCHED + ("eligibility", "location")
+                 for f in WATCHED + ("eligibility", "location", "reimbursement")
                  if describe(project, f) != describe(fresh, f)]
         tally_before[project["status"]] += 1
         tally_after[fresh["status"]] += 1

@@ -566,15 +566,28 @@ _REIMBURSEMENT_TO_PARTICIPANT = (
 )
 
 
+# 在议论花费的高低，不是在说给不给报。
+_REIMBURSEMENT_COST_REMARK = ("费用较高", "成本较高", "开销较大", "价格不菲", "花费不小")
+
+
 def _extract_reimbursement(lines: list[str]) -> tuple[dict[str, Any], str]:
     line = _find_line(lines, ["报销", "补贴", "经费", "交通费", "食宿"])
     if not line:
         return {"has_reimbursement": None, "ratio": None, "amount": None, "text": ""}, ""
+    unknown = ({"has_reimbursement": None, "ratio": None, "amount": None, "text": ""}, "")
+    to_participant = any(term in line for term in _REIMBURSEMENT_TO_PARTICIPANT)
     # 是职责描述、又没有任何面向参与者的措辞，就当没抽到——宁可标成待确认，
     # 也不能把「负责报销工作」说成「有经费支持」。
-    if (any(term in line for term in _REIMBURSEMENT_AS_DUTY)
-            and not any(term in line for term in _REIMBURSEMENT_TO_PARTICIPANT)):
-        return {"has_reimbursement": None, "ratio": None, "amount": None, "text": ""}, ""
+    if any(term in line for term in _REIMBURSEMENT_AS_DUTY) and not to_participant:
+        return unknown
+    # 「青海……因而食宿费用较高」——这是在解释为什么贵，不是在说给不给报。
+    # 判成"有经费支持"是反的；判成"不报销"也没依据。只能是未写明。
+    if any(term in line for term in _REIMBURSEMENT_COST_REMARK) and not to_participant:
+        return unknown
+    # 「经费保障」这种光秃秃的小标题，正文在下一段。拿它当依据说"有经费支持"，
+    # 等于凭一个栏目名下结论。
+    if len(line.strip(" ：:•·、")) <= 6 and not to_participant and not re.search(r"\d", line):
+        return unknown
     negative = any(term in line for term in ["不报销", "无报销", "费用自理", "不提供补贴"])
     ratio_match = RATIO_RE.search(line)
     amount_match = AMOUNT_RE.search(line)

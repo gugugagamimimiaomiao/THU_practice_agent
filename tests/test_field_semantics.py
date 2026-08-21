@@ -56,6 +56,38 @@ class ReimbursementSemanticsTests(unittest.TestCase):
                 result, _ = _extract_reimbursement([line])
                 self.assertIs(result["has_reimbursement"], expected)
 
+    def test_every_wrong_case_found_in_the_live_library(self):
+        """2026-08-21 把线上 17 条判为「有经费支持」的项目逐条翻了一遍，
+        这七条是误判，全部取自真实原文。
+
+        「助梦1+1」那条尤其说明问题：原文在解释青海物价为什么高，
+        系统读成了"这个项目给报销"，意思正好反过来。
+        """
+        for name, line in [
+            ("职责-社团协会部", "计划组主要面向学生社团开展财务工作，负责经费管理：学期末进行财务报销。"),
+            ("职责-清年祁旅", "（1）财务（1人）：负责前期物资采购、中期财务记录，后期财务报销等流程。"),
+            ("职责-黔心守艺", "对接文旅局与非遗中心；与当地文旅局合作安排日程以及当地的食宿、包车、安全预案等。"),
+            ("要求-英纽林", "熟悉学校报销流程，或有订房、租车等后勤经验。"),
+            ("议论花费-助梦1+1", "A：青海属于西北高原地区，交通不便，果蔬米粮大部分由外地输送进省，因而食宿费用较高。"),
+            ("职责-学习实践部", "加入综合协调组，学习财务报销和数据整理的知识与技能。"),
+            ("光秃标题-邯郸", "经费保障"),
+        ]:
+            with self.subTest(name=name):
+                result, _ = _extract_reimbursement([line])
+                self.assertIsNone(result["has_reimbursement"], f"{name} 被误判为有经费支持")
+
+    def test_every_real_benefit_found_in_the_live_library(self):
+        for line in [
+            "各学校将在校内或周边酒店安排食宿，并为支队提供往返大交通和活动文印物料方面的经费支持。",
+            "②每半天提供50元高温补贴；",
+            "为活动志愿者提供往返车费报销、防暑物资保障",
+            "本次实践所有清华志愿者的往返交通、食宿费用均由孙吴县统一承担",
+            "路费和住宿费基本可以报销",
+        ]:
+            with self.subTest(line=line[:18]):
+                result, _ = _extract_reimbursement([line])
+                self.assertIs(result["has_reimbursement"], True, f"真待遇被误伤：{line}")
+
     def test_duty_line_that_also_states_a_benefit_still_counts(self):
         # 有些通知会把两件事写在一行，这时不能一刀切地丢掉。
         line = "负责部门日常事务；参与同学的往返交通费由学校全额报销"
