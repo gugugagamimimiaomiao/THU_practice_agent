@@ -1231,6 +1231,35 @@ class PracticeChatAdapter:
         lines.append("\n想看某一条为什么排在那里，说出它标题里的几个字，我给你逐字段的原文引用。")
         return ChatResult("\n".join(lines), "explain_recommendation")
 
+    @staticmethod
+    def _time_note(profile: dict[str, Any], result: dict[str, Any]) -> str:
+        """说了时间就得交代它在多少条上真的起了作用。
+
+        跟地域是同一类问题：用户给了条件，系统在一部分项目上**静默失效**。
+        线上 36 个项目里只有 14 个写了实践日期，其余 22 个原文根本没写——
+        对它们而言"时间冲突"这条硬条件无从判断，于是照样进推荐。
+        每张卡片上确实写了「原文未写明：实践时间」，但一屏五条里散着看，
+        没人会意识到"我说的时间对其中三条压根没生效"。
+        """
+        start, end = profile.get("available_start"), profile.get("available_end")
+        if not (start and end):
+            return ""
+        shown = result.get("eligible", [])[:5]
+        if not shown:
+            return ""
+        unknown = sum(1 for item in shown
+                      if not (item["project"].get("practice_start")
+                              and item["project"].get("practice_end")))
+        checked = len(shown) - unknown
+        note = f"你说了 {start} 到 {end} 有空："
+        if unknown and checked:
+            note += f"上面 {checked} 条的日期我核过、不冲突；另外 {unknown} 条原文没写实践时间，冲不冲突判断不了。"
+        elif unknown:
+            note += f"上面这 {unknown} 条**原文都没写实践时间**，所以时间这一条实际上没能筛掉任何东西，得你自己看原文确认。"
+        else:
+            note += "上面几条的日期我都核过，跟你的时间不冲突。"
+        return note
+
     def _location_note(self, profile: dict[str, Any], result: dict[str, Any]) -> str:
         """说清楚地域偏好到底满足没满足。没有偏好就返回空串。
 
@@ -1298,9 +1327,9 @@ class PracticeChatAdapter:
         profile = self._profile_from_turns(user_messages)
         result = recommend_projects(self._projects(include_expired=True), profile)
         lines = ["## 正式推荐"]
-        note = self._location_note(profile, result)
-        if note:
-            lines.append(f"\n> {note}\n")
+        for note in (self._location_note(profile, result), self._time_note(profile, result)):
+            if note:
+                lines.append(f"\n> {note}\n")
         if not result["eligible"]:
             # 空结果最容易发生在换了真实数据、或全部项目都过了截止的时候。
             # 与其只说一句"没有"，不如说清楚是被什么条件挡住的、下一步怎么放宽。

@@ -76,5 +76,41 @@ class TimeSpanTests(unittest.TestCase):
         )
 
 
+class TimeNoteTests(unittest.TestCase):
+    """说了时间，就得交代它在多少条上真的起了作用。
+
+    线上 36 个项目里只有 14 个写了实践日期，其余 22 个原文根本没写——
+    对它们而言"时间冲突"这条硬条件无从判断，于是照样进推荐。跟地域是
+    同一类问题：用户给了条件，系统在一部分项目上静默失效。
+    """
+
+    @staticmethod
+    def _note(shown_dates, start="2036-09-10", end="2036-09-12"):
+        from chat_adapter import PracticeChatAdapter
+        profile = {"available_start": start, "available_end": end}
+        result = {"eligible": [
+            {"project": {"practice_start": s, "practice_end": e}} for s, e in shown_dates
+        ]}
+        return PracticeChatAdapter._time_note(profile, result)
+
+    def test_says_how_many_could_not_be_checked(self):
+        note = self._note([("2036-09-11", "2036-09-12"), (None, None), (None, None)])
+        self.assertIn("1 条的日期我核过", note)
+        self.assertIn("2 条原文没写实践时间", note)
+
+    def test_all_unknown_is_stated_plainly(self):
+        note = self._note([(None, None), (None, None)])
+        self.assertIn("没能筛掉任何东西", note)
+
+    def test_all_checked(self):
+        note = self._note([("2036-09-11", "2036-09-12")])
+        self.assertIn("都核过", note)
+
+    def test_no_time_stated_means_no_note(self):
+        from chat_adapter import PracticeChatAdapter
+        self.assertEqual(
+            PracticeChatAdapter._time_note({}, {"eligible": [{"project": {}}]}), "")
+
+
 if __name__ == "__main__":
     unittest.main()
