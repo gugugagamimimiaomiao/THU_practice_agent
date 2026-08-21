@@ -250,6 +250,30 @@ def main() -> int:
             "source_url": url,
             "input_type": article["input_type"] or "copied_text",
         })
+
+        # 配图相关的字段 extract_project 不产出，不带过来就等于把图丢了。
+        for field in ("image_sources", "image_ocr_status"):
+            if project.get(field) and not fresh.get(field):
+                fresh[field] = project[field]
+
+        # 配图还没识别的项目，不能因为重抽而被放行。
+        #
+        # 重抽只看正文，看不到配图。而这类项目当初被标成 needs_review，正是
+        # 因为"关键信息在 24 张配图里，配图尚未识别，正文没有报名截止、资格或
+        # 报名方式"——正文本来就是空的。让它凭正文重抽变成 published，等于把
+        # 这道闸门冲开，把一张没有报名信息的卡片当成可报名项目推给学生。
+        #
+        # 2026-08-21 的预演里有两条正好撞上：组织部、一站式服务部两个学生骨干
+        # 招募，都会从 needs_review 变成 published。
+        if (project.get("status") == "needs_review"
+                and project.get("image_sources")
+                and project.get("image_ocr_status") != "completed"
+                and fresh.get("status") == "published"):
+            fresh["status"] = "needs_review"
+            note = "配图尚未识别，正文信息不足，重抽不改变待核验状态"
+            if note not in fresh.get("risk_notes", []):
+                fresh["risk_notes"] = list(fresh.get("risk_notes", [])) + [note]
+
         diffs = [(f, describe(project, f), describe(fresh, f))
                  for f in WATCHED + ("eligibility", "location")
                  if describe(project, f) != describe(fresh, f)]
