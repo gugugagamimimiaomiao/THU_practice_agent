@@ -354,6 +354,46 @@ CORPUS_STATS_HINTS = (
     "收录了多少", "有多少篇", "数据量", "样本量", "语料",
 )
 
+# ── 生成结果的事实校验 ───────────────────────────────────────────────────
+#
+# 模型写推送时最容易顺手补的就是数字：一个具体的报名截止、一笔补贴金额、
+# 一个「98% 的满意率」。这类东西读起来最像真的，也最容易被学生当真去照做。
+#
+# 叙事性的编造（「山里的孩子」「当地教育资源相对有限」）没法机械核对，
+# 但**数字可以**：生成稿里出现的每个日期、金额、百分比，都应该能在项目卡里
+# 找到出处；找不到就是模型自己加的。这条检查不拦截输出——文案可能只是把
+# 「2026-08-24」写成了「8月24日」——而是把查不到出处的那几个当场点出来。
+_DATE_YMD_RE = re.compile(r"(20\d{2})\s*[-年/.]\s*(\d{1,2})\s*[-月/.]\s*(\d{1,2})")
+_DATE_MD_RE = re.compile(r"(?<!\d)(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]")
+_MONEY_RE = re.compile(r"(?<![\d.])(\d{1,6}(?:\.\d+)?)\s*(?:万元|元|块钱|块)")
+_PERCENT_RE = re.compile(r"(?<![\d.])(\d{1,3}(?:\.\d+)?)\s*%")
+
+
+def _month_days(text: str) -> set[tuple[int, int]]:
+    """文本里的日期，归一成（月, 日）。
+
+    只比月日不比年份：项目卡存的是「2026-08-24」，文案里往往写成「8月24日」，
+    两种写法说的是同一天。年份写错是另一类问题，由日期抽取那边管。
+    """
+    found = {(int(m.group(2)), int(m.group(3))) for m in _DATE_YMD_RE.finditer(text)}
+    found |= {(int(m.group(1)), int(m.group(2))) for m in _DATE_MD_RE.finditer(text)}
+    return found
+
+
+def _amounts(text: str) -> set[str]:
+    found = {m.group(1) for m in _MONEY_RE.finditer(text)}
+    found |= {m.group(1) + "%" for m in _PERCENT_RE.finditer(text)}
+    return found
+
+
+def unsupported_numbers(draft: str, facts: str) -> list[str]:
+    """生成稿里出现、但在事实来源里查不到的日期和金额。"""
+    out = [f"{month}月{day}日" for month, day in sorted(_month_days(draft) - _month_days(facts))]
+    out += [item if item.endswith("%") else f"{item}元"
+            for item in sorted(_amounts(draft) - _amounts(facts))]
+    return out
+
+
 # ── 会话状态：从 messages 里确定性地还原，而不是拼接全文去猜 ──────────────
 #
 # 平台每轮都把完整历史（含 assistant 消息）发过来，但 reply() 原来只挑 user
@@ -961,6 +1001,12 @@ class PracticeChatAdapter:
                               "revise_degraded")
         if not body.strip():
             return ChatResult("这次没改出更好的版本，把要求说得更具体些再试一次？", "revise_degraded")
+        # 改稿最容易出的问题是"顺手补一个具体数字"。上一版和这条指令里都没有的
+        # 日期、金额、百分比，一律点出来。
+        invented = unsupported_numbers(body, draft + "\n" + latest)
+        if invented:
+            body += ("\n\n> **这几个数字是这一版新加的，上一版和你的指令里都没有**："
+                     + "、".join(invented) + "。请核实后再用。")
         return ChatResult(body.strip(), "revise")
 
     def _is_why_question(self, latest: str, user_messages: list[str]) -> bool:
@@ -1481,9 +1527,11 @@ class PracticeChatAdapter:
         def produce() -> Iterable[str]:
             yield header
             produced_any = False
+            written: list[str] = []
             try:
                 for piece in llm.stream(self._POST_SYSTEM_PROMPT, user_prompt):
                     produced_any = True
+                    written.append(piece)
                     yield piece
             except llm.LLMUnavailable as exc:
                 reason = f"写作模型这次没能用上（{exc}）"
@@ -1494,6 +1542,15 @@ class PracticeChatAdapter:
                     yield "\n\n---\n\n"
                 yield self._post_outline(project, facts, reason=reason)
                 return
+            # 数字是最容易被顺手编出来、也最容易被当真的东西。逐个回查项目卡，
+            # 查不到出处的当场点名——不拦截，但绝不让它悄悄混过去。
+            invented = unsupported_numbers("".join(written), facts)
+            if invented:
+                yield (
+                    "\n\n> **这几个数字在项目卡里查不到出处**："
+                    + "、".join(invented)
+                    + "。多半是模型写顺手加的，发布前务必删掉或去原文核实。"
+                )
             yield (
                 "\n\n---\n"
                 "> 以上文案由模型基于已核验的项目卡生成，发布前请逐条核对原文通知；"
