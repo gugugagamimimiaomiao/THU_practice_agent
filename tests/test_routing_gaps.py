@@ -103,6 +103,50 @@ class BindingSelfCheckTests(unittest.TestCase):
         self.assertIn("没有编号列表", content)
 
 
+class ReplyLengthTests(unittest.TestCase):
+    """推荐回复太长会直接变成等待时间——清小搭那边渲染很慢。
+
+    实测一条 1272 字，其中五张完整卡片占 954、线索区占 317。
+    直接砍到三条又损失选择面（真实数据本来就少），所以做成分层：
+    前三条完整卡片，第四五条一行，线索区只留标题。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tempdir = tempfile.TemporaryDirectory()
+        cls.database = Database(Path(cls.tempdir.name) / "chat.db")
+        for i in range(6):
+            title = f"赴某地实践支队招募第{i}期"
+            import_article_text(
+                cls.database,
+                {"title": title, "source_account": "清华大学社会实践",
+                 "source_url": f"https://mp.weixin.qq.com/s/len{i}"},
+                f"现面向全校招募队员，前往某地开展实践。\n报名截止：2036年9月1{i}日\n"
+                f"参与资格：全校本科生\n报名方式：扫码\n实践时间：2036年9月20日至2036年9月25日\n",
+            )
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tempdir.cleanup()
+
+    def setUp(self):
+        chat_adapter.llm.is_enabled = lambda: False
+        self.adapter = PracticeChatAdapter(self.database)
+
+    def test_five_options_are_still_offered(self):
+        content = self.adapter.reply([{"role": "user", "content": "推荐一些实践"}]).content
+        listed = [m.group(1) for m in chat_adapter._LISTED_RE.finditer(content)]
+        self.assertEqual(listed[:5], ["1", "2", "3", "4", "5"],
+                         "压缩不能以少给选项为代价")
+
+    def test_only_the_first_three_get_full_cards(self):
+        content = self.adapter.reply([{"role": "user", "content": "推荐一些实践"}]).content
+        # 完整卡片会带「原文：」那一行，一行式条目不带。
+        head = content.split("4. **")[0]
+        self.assertEqual(head.count("- 原文："), 3)
+        self.assertNotIn("- 原文：", content.split("4. **")[1].split("## ")[0])
+
+
 class SummaryTests(unittest.TestCase):
     def test_summary_does_not_repeat_the_title(self):
         """真实数据上出现过的摘要：

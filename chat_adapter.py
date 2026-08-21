@@ -586,13 +586,56 @@ _CN_MONTHS = {
 }
 
 
-def _month_span(text: str) -> tuple[str, str] | None:
-    """把「八月」「8月」解析成一整个月的起止日期。
+# 「上旬/中旬/下旬」按通行的三分法：1–10、11–20、21–月末。
+_TEN_DAY_SPANS = {"上旬": (1, 10), "中旬": (11, 20), "下旬": (21, 31)}
+# 「9月10号到9月20号」这类明确区间。日期里的「号」和「日」都要认。
+_DAY_RANGE_RE = re.compile(
+    r"(?<!\d)(1[0-2]|[1-9])\s*月\s*(\d{1,2})\s*[日号]?\s*(?:到|至|-|—|~|～)\s*"
+    r"(?:(1[0-2]|[1-9])\s*月\s*)?(\d{1,2})\s*[日号]?"
+)
+_SINGLE_DAY_RE = re.compile(r"(?<!\d)(1[0-2]|[1-9])\s*月\s*(\d{1,2})\s*[日号]")
 
-    这里原本写死成 2026-07/2026-08 两个月份。写死日期在这个项目里已经咬过
-    两次（演示数据的截止日、推荐页默认可用时间），所以改成按当前年份推算，
-    并且覆盖全部 12 个月：说到的月份如果今年已经整月过完，就理解为明年的该月。
+
+def _resolve_year(month: int, day: int) -> int:
+    """说到的月日如果今年已经过完，就理解为明年——学生说「九月」时指的是
+    最近的那个九月，不会是已经过去的那个。"""
+    today = date.today()
+    try:
+        target = date(today.year, month, min(day, calendar.monthrange(today.year, month)[1]))
+    except ValueError:
+        return today.year
+    return today.year if target >= today else today.year + 1
+
+
+def _month_span(text: str) -> tuple[str, str] | None:
+    """把口语里的时间说法解析成起止日期。
+
+    原来只认「八月」「8月」，一律返回整月。实测下来这会把用户给的精确区间
+    撑大：「9月10号到9月20号有空」被理解成整个九月，于是"实践日期与可用时间
+    冲突"这条硬条件几乎筛不掉东西——一个月的窗口跟什么都不冲突。
+    「9月上旬」同理，被当成整个九月。
+
+    现在按精确度从高到低试：明确区间 → 单日 → 旬 → 整月。
     """
+    today = date.today()
+
+    # 1）明确区间：「9月10号到9月20号」「9月10日至20日」
+    match = _DAY_RANGE_RE.search(text)
+    if match:
+        m1, d1 = int(match.group(1)), int(match.group(2))
+        m2 = int(match.group(3)) if match.group(3) else m1
+        d2 = int(match.group(4))
+        year = _resolve_year(m1, d1)
+        end_year = year + 1 if m2 < m1 else year          # 跨年区间，比如 12月28日到1月5日
+        try:
+            start = date(year, m1, min(d1, calendar.monthrange(year, m1)[1]))
+            end = date(end_year, m2, min(d2, calendar.monthrange(end_year, m2)[1]))
+        except ValueError:
+            return None
+        if end >= start:
+            return start.isoformat(), end.isoformat()
+
+    # 2）旬：「9月上旬」
     month = None
     match = re.search(r"(?<!\d)(1[0-2]|[1-9])\s*月", text)
     if match:
@@ -602,9 +645,27 @@ def _month_span(text: str) -> tuple[str, str] | None:
             if f"{name}月" in text:
                 month = _CN_MONTHS[name]
                 break
+    if month:
+        for label, (first, last) in _TEN_DAY_SPANS.items():
+            if label in text:
+                year = _resolve_year(month, first)
+                last = min(last, calendar.monthrange(year, month)[1])
+                return f"{year}-{month:02d}-{first:02d}", f"{year}-{month:02d}-{last:02d}"
+
+    # 3）单日：「9月10号那天」
+    match = _SINGLE_DAY_RE.search(text)
+    if match:
+        m, d = int(match.group(1)), int(match.group(2))
+        year = _resolve_year(m, d)
+        try:
+            day = date(year, m, min(d, calendar.monthrange(year, m)[1]))
+        except ValueError:
+            return None
+        return day.isoformat(), day.isoformat()
+
+    # 4）整月：「八月」「8月」
     if not month:
         return None
-    today = date.today()
     year = today.year
     last_day = calendar.monthrange(year, month)[1]
     if date(year, month, last_day) < today:
@@ -1264,25 +1325,37 @@ class PracticeChatAdapter:
                     "\n可以试着放宽一个条件——比如换个时间段、去掉地点限制，"
                     "或者说「还有哪些实践机会」看全部在招项目。"
                 )
-        for index, item in enumerate(result["eligible"][:5], 1):
+        # 前三条给完整卡片，第四五条压成一行。
+        #
+        # 实测一条推荐回复 1272 字，其中五张完整卡片占 954。清小搭那边渲染很慢，
+        # 长度直接变成等待时间。但直接砍到三条又损失了选择面——真实数据本来就少，
+        # 少给两个选项对学生是实实在在的损失。
+        # 分层能两头兼顾：前三条照旧可以直接判断能不能报，后两条留个名字和一句
+        # 关键信息，想看详情说标题里那几个字就行。
+        for index, item in enumerate(result["eligible"][:3], 1):
             lines.extend(self._recommendation_card(index, item))
+        for index, item in enumerate(result["eligible"][3:5], 4):
+            lines.append(self._recommendation_line(index, item))
         if result["potential"]:
             # 标题原来叫「潜在机会（需先复核）」，条目排版和正式推荐几乎一样，
             # 实测里学生分不出来——一条 2036 年截止、没有原文链接的导入线索，
             # 看起来跟真实招募没区别。这里改成把"这还不算数"写在最前面，
             # 并且明确点出没有原文可查的那些。
             lines.append("\n## 线索（尚未核实，不能作为报名依据）")
-            lines.append("下面这些是采集到但**还没核对完**的记录，字段可能有误，也可能根本不存在。")
+            lines.append("采集到但**还没核对完**，字段可能有误，也可能根本不存在：")
+            # 每条只留标题。原来把两条 warning 全展开，这一段占了整条回复的
+            # 四分之一（1272 字里的 317），而"为什么待核验"是追问时才需要的细节，
+            # 第一屏上真正要传达的只有一件事：这些还不算数。
             for item in result["potential"][:3]:
                 project = item["project"]
-                warnings = "；".join(item["warnings"][:2])
                 if project.get("source_url"):
-                    lines.append(f"- 线索待核验：**{project['title']}** — {warnings}")
+                    lines.append(f"- 线索待核验：**{project['title']}**")
                 else:
                     lines.append(
-                        f"- 线索待核验：导入记录称有「{project['title']}」，"
-                        f"但**没有原文链接可查**，无法核实是否真实存在。{warnings}"
+                        f"- 线索待核验：**{project['title']}**（**没有原文链接可查**，"
+                        "无法核实是否真实存在）"
                     )
+            lines.append("想知道某一条卡在哪，说出它标题里的几个字。")
         if result["excluded"]:
             lines.append(f"\n另有 {len(result['excluded'])} 个项目因截止、时间、资格或经费硬条件被排除。")
 
@@ -1796,6 +1869,16 @@ class PracticeChatAdapter:
             "比较两个项目、为指定项目生成报名理由和外联访谈材料、把招募通知转成项目卡。\n\n"
             "先说说你的院系、年级和大概什么时候有空？"
         )
+
+    @staticmethod
+    def _recommendation_line(index: int, item: dict[str, Any]) -> str:
+        """第四五名的一行式条目：留住名字和一句最能帮人做判断的信息。"""
+        project = item["project"]
+        detail = (project.get("location") or {}).get("detail") or ""
+        deadline = project.get("signup_deadline")
+        facts = [f"截止 {deadline}" if deadline else "", f"地点 {detail}" if detail else ""]
+        tail = "；".join(f for f in facts if f) or "关键字段以原文为准"
+        return f"{index}. **{project['title']}** — {tail}"
 
     @staticmethod
     def _recommendation_card(index: int, item: dict[str, Any]) -> list[str]:
