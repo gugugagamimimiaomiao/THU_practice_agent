@@ -126,7 +126,10 @@ IDENTITY_TERMS = ["清华学生", "清华师生", "学生党员", "共青团员"
 
 THEME_KEYWORDS = {
     "乡村振兴": ["乡村振兴", "农村", "乡村", "产业振兴", "基层治理"],
-    "教育": ["教育", "支教", "学习", "课程", "儿童"],
+    # 「讲课/授课/上课/带课」并进教育主题：实测「主要做技术支持，不讲课」
+    # 推出来的第一条正是支教项目——「不讲课」这句话完全没生效，因为词表里
+    # 只有"支教""课程"，认不出"讲课"说的是同一件事。
+    "教育": ["教育", "支教", "学习", "课程", "儿童", "讲课", "授课", "上课", "带课", "教课"],
     "科技创新": ["科技", "人工智能", "AI", "数字化", "创新", "科普"],
     "生态环保": ["生态", "环保", "环境", "低碳", "生物多样性"],
     "公益志愿": ["公益", "志愿", "服务", "助老", "帮扶"],
@@ -803,7 +806,11 @@ def extract_project(raw_text: str, metadata: dict[str, Any] | None = None, *, to
         "publish_date": metadata.get("publish_date") or None,
         "organizer": organizer,
         "summary": _summarize(lines, title, cleaned),
-        "theme_tags": _extract_themes(cleaned),
+        # 标题也算进主题：一篇通知里信息量最大的就是标题，
+        # 「…赴湖南新宁支教实践支队招募」写得清清楚楚是支教，而正文可能通篇
+        # 讲行程和保障，一次都没出现"支教"两个字——只看正文会把它标成「综合实践」，
+        # 用户说「不讲课」时就排不掉它。
+        "theme_tags": _extract_themes(f"{title}\n{cleaned}"),
         "practice_start": practice_start,
         "practice_end": practice_end,
         "schedule_segments": schedule_segments,

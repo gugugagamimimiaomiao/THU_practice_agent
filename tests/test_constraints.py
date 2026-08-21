@@ -67,6 +67,36 @@ class ConstraintTests(unittest.TestCase):
                 for title in titles:
                     self.assertNotIn("学生骨干", title)
 
+    def test_not_wanting_to_teach_excludes_teaching_projects(self):
+        """「主要做技术支持，不讲课」实测推出来的第一条正是支教项目。
+
+        词表里只有"支教""课程"，认不出"讲课"说的是同一件事，
+        于是这句否定完全没生效。
+        """
+        profile = self.adapter._extract_profile("想找实践，主要做技术支持，不讲课")
+        self.assertIn("教育", profile["excluded_themes"])
+        titles = self._recommended_titles(self.reply("想找实践，主要做技术支持，不讲课").content)
+        for title in titles:
+            self.assertNotIn("支教", title)
+
+    def test_wanting_to_teach_still_reads_as_education(self):
+        # 反向不能坏：说「想去讲课」得认出教育主题。
+        self.assertIn("教育", self.adapter._extract_profile("想去讲课")["themes"])
+
+    def test_intangible_heritage_is_not_read_as_a_negation(self):
+        """「非」曾经在否定词表里，于是「想做非遗相关的实践」被整句判成否定，
+        把文化传承主题扔进了排除表。非遗是这个领域的常用词，不是否定。"""
+        profile = self.adapter._extract_profile("想做非遗相关的实践")
+        self.assertIn("文化传承", profile["themes"])
+        self.assertEqual(profile["excluded_themes"], [])
+
+    def test_affirmative_bu_phrases_are_not_negations(self):
+        for text in ["不限年级都可以", "不少人推荐这个", "不仅要支教还想调研"]:
+            with self.subTest(text=text):
+                profile = self.adapter._extract_profile(text)
+                self.assertEqual(profile["excluded_themes"], [])
+                self.assertEqual(profile["excluded_terms"], [])
+
     def test_bare_negation_turn_is_not_mistaken_for_a_project_lookup(self):
         """「不考虑学生骨干岗位」单独成一轮时，实测被模糊匹配成项目名，
         端出五个学生骨干岗位让用户挑——跟他说的正好相反。

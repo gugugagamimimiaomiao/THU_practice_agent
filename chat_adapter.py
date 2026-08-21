@@ -421,8 +421,25 @@ _ORDINAL_RE = re.compile(r"第\s*([一二两三四五六七八九十]|\d{1,2})\s
 # 覆盖了绝大多数写法（「想去支教，不要学生骨干」「除了北京都行」）。
 _NEGATION_LEADS = (
     "不要", "不想", "不考虑", "不用", "别推", "别给", "别拿", "除了", "排除",
-    "不接受", "不去", "不做", "不看", "不感兴趣", "不是", "非",
+    "不接受", "不去", "不做", "不看", "不感兴趣", "不是",
 )
+# 固定搭配列不完：「主要做技术支持，不讲课」里的「不讲课」一个都对不上，
+# 于是这句否定完全没生效，推出来的第一条正是支教项目。
+# 小句以否定词开头是个很强的信号，比穷举动词可靠。
+#
+# 「非」不能进这套规则——「想做非遗相关的实践」会被整句判成否定，
+# 把文化传承主题扔进排除表。非遗是这个领域的常用词，不是否定。
+_NEGATION_PREFIXES = ("不", "别", "勿", "无需", "毋须")
+# 这几个「不X」是肯定语义，别误当否定。
+_NOT_ACTUALLY_NEGATIVE = ("不限", "不错", "不少", "不仅", "不止", "不但", "不管", "不论")
+
+
+def _is_negative_clause(clause: str) -> bool:
+    text = clause.strip()
+    if any(word in text for word in _NOT_ACTUALLY_NEGATIVE):
+        return False
+    return (any(lead in text for lead in _NEGATION_LEADS)
+            or text.startswith(_NEGATION_PREFIXES))
 # 排他：这类说法是把偏好升级成硬条件，允许空结果。
 _EXCLUSIVE_LEADS = ("只要", "只看", "只考虑", "仅限", "必须是", "必须在", "只想", "就要", "仅")
 # 用户明确表态"宁可没有也别凑数"。这时空结果就是正确答案。
@@ -931,8 +948,7 @@ class PracticeChatAdapter:
         }
         original = text
         # 带否定词的小句单独拎出来：里面的地名、主题进排除表，不进偏好表。
-        negative_clauses = [c for c in _split_clauses(text)
-                            if any(word in c for word in _NEGATION_LEADS)]
+        negative_clauses = [c for c in _split_clauses(text) if _is_negative_clause(c)]
         if negative_clauses:
             joined = "，".join(negative_clauses)
             _, profile["excluded_locations"] = expand_location_query(joined)

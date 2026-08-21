@@ -184,7 +184,10 @@ def describe(project: dict, field: str) -> str:
         has = (project.get("reimbursement") or {}).get("has_reimbursement")
         label = {True: "有", False: "无", None: "未写明"}[has]
         return f"{label}｜{(project.get('reimbursement') or {}).get('text', '')[:30]}"
-    return str(project.get(field) or "(空)")
+    value = project.get(field)
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)[:200] or "(空)"
+    return str(value or "(空)")
 
 
 def main() -> int:
@@ -278,12 +281,19 @@ def main() -> int:
             if note not in fresh.get("risk_notes", []):
                 fresh["risk_notes"] = list(fresh.get("risk_notes", [])) + [note]
 
-        # reimbursement 以前不在比对里，后果不只是"看不到变化"——下面
-        # `if not diffs: continue` 会连写库一起跳过。2026-08-21 修了经费误抽
-        # 之后跑 --apply，有五条项目的错误值原样留在库里，就是因为它们只有
-        # 经费字段变了。凡是会影响判断的字段都得进这张表。
+        # 比对字段不再手工维护。
+        #
+        # 这张清单漏过两次，每次的后果都一样：`if not diffs: continue` 会连
+        # 写库一起跳过，规则明明改对了，结果没进数据库。
+        #   - 2026-08-21 修经费误抽，五条项目的错值原样留在库里（缺 reimbursement）
+        #   - 同一天修摘要重复标题，一条都没写进去（缺 summary）
+        # 两次都是"我以为我列全了"。改成自动取全部内容字段，只排掉身份和
+        # 时间戳这类本来就该保留的，漏字段这个错就不可能再犯。
+        volatile = {"id", "created_at", "updated_at", "article_id", "version",
+                    "image_sources", "image_ocr_status"}
+        fields = sorted((set(project) | set(fresh)) - volatile)
         diffs = [(f, describe(project, f), describe(fresh, f))
-                 for f in WATCHED + ("eligibility", "location", "reimbursement")
+                 for f in WATCHED + tuple(f for f in fields if f not in WATCHED)
                  if describe(project, f) != describe(fresh, f)]
         tally_before[project["status"]] += 1
         tally_after[fresh["status"]] += 1
