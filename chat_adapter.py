@@ -466,6 +466,21 @@ _STRUCTURED_REPLY_MARKERS = (
 )
 
 
+# 「给我三个支教项目」「来两个调研的」——这是要推荐，不是要看全部。
+# 实测里它掉给了模型做意图分类，被判成 list，于是端出整个项目库，
+# 列出来的五条一个支教都没有——用户说了主题却完全没生效。
+_ASK_FOR_N_RE = re.compile(
+    r"(?:给我|来|要|找)\s*[一二两三四五六七八九十\d]+\s*(?:个|条|份|项)?"
+    r".{0,6}(?:项目|实践|志愿|机会|支教|调研)"
+)
+
+# 用户在质疑我有没有把项目搞混。这是最该答得上来的问题之一，
+# 而实测第 100 轮问「是不是串线了」掉了兜底。
+_MISBIND_RE = re.compile(
+    r"串线|串了|搞混|弄混|混了|搞错了对象|说的是哪个|指的是哪个|"
+    r"对应的是哪个|绑(?:定)?的是哪个|是同一个吗|前后不一致|自相矛盾"
+)
+
 # 指代词。「它」要排除「其它/其他」里的那个字。
 _DEICTIC_RE = re.compile(
     r"这个项目|那个项目|该项目|这一个|这条|这个|上面那个|刚才那个|刚才那条|上述|(?<!其)它"
@@ -653,6 +668,11 @@ class PracticeChatAdapter:
         # 追问推荐依据是评委最可能问的一句，必须单独接住。
         if self._is_why_question(latest, user_messages):
             return self._explain_recommendation(user_messages)
+        # 「是不是串线了」「你刚才说的是哪个项目」——用户在质疑我有没有搞混。
+        # 实测第 100 轮问这句掉了兜底，而这恰恰是最该答得上来的问题：
+        # 答案就是我当前认定的那份列表，摆出来他一眼就能判断对不对。
+        if _MISBIND_RE.search(latest):
+            return self._explain_binding(messages)
         # 对已采集数据的统计性提问。同样要排在项目匹配之前——「实践招募一般
         # 什么时候发布」里的"实践招募"会模糊命中一堆标题，变成项目候选列表。
         if any(word in latest for word in CORPUS_STATS_HINTS) and not self._mentions_project_exactly(latest):
@@ -662,7 +682,12 @@ class PracticeChatAdapter:
         if (any(word in latest for word in WRITING_HELP_WORDS + GENERIC_WRITING_HINTS)
                 or _NAMING_RE.search(latest)) and not self._mentions_project_exactly(latest):
             return self._writing_help(latest)
-        if any(word in latest for word in NEGATION_WORDS):
+        # 否定的判定统一走 _extract_profile 的否定小句逻辑，不再单独维护一张
+        # NEGATION_WORDS 词表——两张表一定会漂。实测漏掉的就是「不考虑」：
+        # 「不考虑学生骨干岗位」单独成一轮时，NEGATION_WORDS 没接住，
+        # 「学生骨干」被模糊匹配成项目名，于是列出五个学生骨干岗位让用户挑，
+        # 跟用户说的正好相反。
+        if any(word in latest for word in NEGATION_WORDS) or self._states_an_exclusion(latest):
             return self._handle_correction(messages, all_user_text, latest)
         if any(word in latest for word in DECISION_WORDS):
             return self._help_decide(messages, all_user_text, latest)
@@ -675,7 +700,7 @@ class PracticeChatAdapter:
             return self._generate(messages, all_user_text, latest)
         if _COMPARE_RE.search(latest):
             return self._compare(messages, all_user_text)
-        if any(word in latest for word in RECOMMEND_WORDS):
+        if any(word in latest for word in RECOMMEND_WORDS) or _ASK_FOR_N_RE.search(latest):
             return self._recommend(user_messages)
         # 条件筛选：「有没有校内的志愿服务」「只看志愿服务」。必须排在项目匹配
         # 之前——否则句子里的"志愿服务"会模糊命中某个标题，变成查那一个项目。
@@ -1008,6 +1033,33 @@ class PracticeChatAdapter:
             body += ("\n\n> **这几个数字是这一版新加的，上一版和你的指令里都没有**："
                      + "、".join(invented) + "。请核实后再用。")
         return ChatResult(body.strip(), "revise")
+
+    def _explain_binding(self, messages: list[dict[str, Any]]) -> ChatResult:
+        """摆出我当前认定的列表和绑定对象，让用户当场判断有没有搞混。"""
+        shown = self._shown_list(messages)
+        detailed = self._last_detailed(messages)
+        lines = ["## 我现在认定的是这些"]
+        if shown:
+            lines.append("\n你最近看到的编号列表（「第一个」「第二个」指的就是它们）：\n")
+            lines.extend(f"{i}. {p['title']}" for i, p in enumerate(shown, 1))
+        else:
+            lines.append("\n我这边没有编号列表——你还没让我推荐过，或者中间换过话题。"
+                         "这种时候你说「第一个」我不会瞎猜，会先问你是哪个。")
+        if detailed:
+            lines.append(f"\n最近展开过详情的项目：**{detailed['title']}**。"
+                         "「它」「这个项目」指的是这一个。")
+        lines.append(
+            "\n对不上就直接说项目名，我按名字重新绑。"
+            "\n\n> 这份列表是从我上一条回复里逐条还原出来的，不是猜的——"
+            "所以如果上面写的和你屏幕上看到的不一样，那是真出问题了，请告诉我。"
+        )
+        return ChatResult("\n".join(lines), "explain_binding")
+
+    def _states_an_exclusion(self, latest: str) -> bool:
+        """这一句里有没有真的排除掉什么。判据跟推荐时用的是同一套。"""
+        profile = self._extract_profile(latest)
+        return bool(profile["excluded_terms"] or profile["excluded_locations"]
+                    or profile["excluded_themes"] or profile["location_strict"])
 
     def _is_why_question(self, latest: str, user_messages: list[str]) -> bool:
         """这句是在追问推荐依据，而不是发起一次新的推荐。

@@ -52,9 +52,30 @@ class ConstraintTests(unittest.TestCase):
         return self.adapter.reply([{"role": "user", "content": t} for t in texts])
 
     # ── 否定 ──────────────────────────────────────────────────────────
+    def _recommended_titles(self, content: str) -> list[str]:
+        import chat_adapter as _ca
+        return [m.group(2) for m in _ca._LISTED_RE.finditer(content.split("## 线索")[0])]
+
     def test_negated_term_is_actually_excluded(self):
-        content = self.reply("推荐一些实践，不考虑学生骨干岗位").content
-        self.assertNotIn("学生骨干", content.split("## 线索")[0])
+        # 只看推荐条目。回复开头会复述「我理解你想避开：学生骨干」——那句
+        # 出现这几个字是应该的，它让用户能当场纠正我理解错的地方。
+        for text in ["推荐一些实践，不考虑学生骨干岗位",
+                     "不考虑学生骨干岗位"]:
+            with self.subTest(text=text):
+                titles = self._recommended_titles(self.reply(text).content)
+                self.assertTrue(titles, "一条推荐都没有，这条用例失去意义")
+                for title in titles:
+                    self.assertNotIn("学生骨干", title)
+
+    def test_bare_negation_turn_is_not_mistaken_for_a_project_lookup(self):
+        """「不考虑学生骨干岗位」单独成一轮时，实测被模糊匹配成项目名，
+        端出五个学生骨干岗位让用户挑——跟他说的正好相反。
+
+        原因是否定判定挂在一张单独的 NEGATION_WORDS 词表上，而那张表里
+        没有「不考虑」。现在改成跟推荐用同一套否定小句逻辑，两张表不会再漂。
+        """
+        result = self.reply("不考虑学生骨干岗位")
+        self.assertNotEqual(result.intent, "project_candidates")
 
     def test_negation_does_not_kill_the_positive_part_of_the_same_sentence(self):
         """「想去支教，不要学生骨干」——支教要保住，学生骨干要挡掉。"""

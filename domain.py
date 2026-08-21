@@ -674,6 +674,33 @@ def _normalize_notice_lines(lines: list[str]) -> list[str]:
     return merged
 
 
+def _summarize(lines: list[str], title: str, cleaned: str) -> str:
+    """项目卡上那句摘要。
+
+    原来是 `"".join(lines[1:4])`——无分隔地拼前三行。公众号推送开头常把标题
+    拆成几行重复排版，于是真实数据上出现过这种摘要：
+
+        机械系“宝庆微光”赴湖南新宁支教实践支队招募实践招募机械系“宝庆微光”赴湖南新宁支教实践支队招募
+
+    同一个标题读三遍，既没信息又显得系统坏了。跳过与标题重复的行，
+    留下真正有内容的那几句，并且用分隔符连接。
+    """
+    core = re.sub(r"[\s|｜丨\-—－·]", "", title)
+    picked: list[str] = []
+    for line in lines[1:8]:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        bare = re.sub(r"[\s|｜丨\-—－·]", "", stripped)
+        # 与标题高度重合的行（标题本身、标题的一段）不带进摘要。
+        if core and (bare in core or core in bare):
+            continue
+        picked.append(stripped)
+        if len(" ".join(picked)) >= 120:
+            break
+    return " ".join(picked)[:260] or cleaned[:260]
+
+
 def extract_project(raw_text: str, metadata: dict[str, Any] | None = None, *, today: date | None = None) -> dict[str, Any]:
     """Extract a conservative project card from copied text or OCR text."""
     metadata = metadata or {}
@@ -775,7 +802,7 @@ def extract_project(raw_text: str, metadata: dict[str, Any] | None = None, *, to
         "source_url": source_url,
         "publish_date": metadata.get("publish_date") or None,
         "organizer": organizer,
-        "summary": "".join(lines[1:4])[:260] if len(lines) > 1 else cleaned[:260],
+        "summary": _summarize(lines, title, cleaned),
         "theme_tags": _extract_themes(cleaned),
         "practice_start": practice_start,
         "practice_end": practice_end,
