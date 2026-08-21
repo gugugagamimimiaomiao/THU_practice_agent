@@ -83,6 +83,8 @@ class ReimbursementSemanticsTests(unittest.TestCase):
             "为活动志愿者提供往返车费报销、防暑物资保障",
             "本次实践所有清华志愿者的往返交通、食宿费用均由孙吴县统一承担",
             "路费和住宿费基本可以报销",
+            # 这条被第一版规则误伤过：「材料审核」里的"审核"命中了职责词。
+            "报名参加“青年技能绿动”暑期专项活动，完成项目任务并通过材料审核的支队，可获得 3000 元额外报销额度。",
         ]:
             with self.subTest(line=line[:18]):
                 result, _ = _extract_reimbursement([line])
