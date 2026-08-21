@@ -124,6 +124,29 @@ class SummaryTests(unittest.TestCase):
         self.assertIn("前往湖南省邵阳市", summary)
         self.assertLess(summary.count("宝庆微光"), 2, f"标题被重复进摘要：{summary}")
 
+    def test_summary_skips_wechat_boilerplate(self):
+        """跳过重复标题之后紧接着的往往是公众号名和阅读器提示。
+
+        第一版没管，于是真实数据上的摘要变成了
+
+            清华大学社会实践 在小说阅读器读本章 去阅读 在小说阅读器中沉浸阅读
+
+        比原来的"标题读三遍"还糟——那至少还是这个项目的字。
+        """
+        title = "实践招募 | 宝庆微光赴湖南新宁支教实践支队招募"
+        lines = [
+            title,
+            "清华大学社会实践",
+            "在小说阅读器读本章",
+            "去阅读",
+            "在小说阅读器中沉浸阅读",
+            "现面向全校招募队员，前往湖南省邵阳市新宁县第一中学开展支教实践。",
+        ]
+        summary = _summarize(lines, title, "\n".join(lines), account="清华大学社会实践")
+        self.assertIn("前往湖南省邵阳市", summary)
+        for noise in ("小说阅读器", "去阅读", "清华大学社会实践"):
+            self.assertNotIn(noise, summary)
+
     def test_summary_falls_back_when_everything_repeats_the_title(self):
         title = "某支队招募"
         lines = [title, "某支队招募", "某支队招募"]

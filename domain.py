@@ -677,7 +677,17 @@ def _normalize_notice_lines(lines: list[str]) -> list[str]:
     return merged
 
 
-def _summarize(lines: list[str], title: str, cleaned: str) -> str:
+# 微信页面模板噪音。抓下来的正文开头常带这些。
+# 定义在这里而不是 corpus.py，是因为摘要和语料两边都要用——放两份一定会漂。
+PAGE_BOILERPLATE = (
+    "在小说阅读器读本章", "去阅读", "在小说阅读器中沉浸阅读",
+    "点击上方蓝字", "点击蓝字", "关注我们", "星标我们", "长按识别二维码关注",
+    "预览时标签不可点", "微信扫一扫关注该公众号", "轻点两下取消赞",
+    "继续滑动看下一个", "向上滑动看下一个",
+)
+
+
+def _summarize(lines: list[str], title: str, cleaned: str, account: str = "") -> str:
     """项目卡上那句摘要。
 
     原来是 `"".join(lines[1:4])`——无分隔地拼前三行。公众号推送开头常把标题
@@ -690,13 +700,20 @@ def _summarize(lines: list[str], title: str, cleaned: str) -> str:
     """
     core = re.sub(r"[\s|｜丨\-—－·]", "", title)
     picked: list[str] = []
-    for line in lines[1:8]:
+    for line in lines[1:12]:
         stripped = line.strip()
         if not stripped:
             continue
         bare = re.sub(r"[\s|｜丨\-—－·]", "", stripped)
         # 与标题高度重合的行（标题本身、标题的一段）不带进摘要。
         if core and (bare in core or core in bare):
+            continue
+        # 跳过标题重复行之后紧接着的往往是公众号名和阅读器提示。第一版没管，
+        # 于是真实数据上的摘要变成了
+        # 「清华大学社会实践 在小说阅读器读本章 去阅读 在小说阅读器中沉浸阅读」。
+        if any(noise in stripped for noise in PAGE_BOILERPLATE):
+            continue
+        if account and bare == re.sub(r"\s", "", account):
             continue
         picked.append(stripped)
         if len(" ".join(picked)) >= 120:
@@ -805,7 +822,7 @@ def extract_project(raw_text: str, metadata: dict[str, Any] | None = None, *, to
         "source_url": source_url,
         "publish_date": metadata.get("publish_date") or None,
         "organizer": organizer,
-        "summary": _summarize(lines, title, cleaned),
+        "summary": _summarize(lines, title, cleaned, source_account),
         # 标题也算进主题：一篇通知里信息量最大的就是标题，
         # 「…赴湖南新宁支教实践支队招募」写得清清楚楚是支教，而正文可能通篇
         # 讲行程和保障，一次都没出现"支教"两个字——只看正文会把它标成「综合实践」，
