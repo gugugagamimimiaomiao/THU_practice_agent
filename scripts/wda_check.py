@@ -78,6 +78,20 @@ def find_db(explicit: str, install: Path | None) -> Path | None:
     return None
 
 
+def read_port(install: Path | None, default: int = 5000) -> int:
+    """从它的 .env 里读 PORT。读不到就用默认。"""
+    if not install:
+        return default
+    env_file = install / ".env"
+    if not env_file.exists():
+        return default
+    for line in env_file.read_text("utf-8", "replace").splitlines():
+        line = line.strip()
+        if line.startswith("PORT=") and line[5:].strip().isdigit():
+            return int(line[5:].strip())
+    return default
+
+
 def read_db(path: Path) -> dict:
     connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     connection.row_factory = sqlite3.Row
@@ -130,14 +144,16 @@ def scan_logs(install: Path) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--api", default="http://127.0.0.1:5000", help="服务地址")
+    parser.add_argument("--api", default="", help="服务地址（默认按它 .env 里的 PORT 推断）")
     parser.add_argument("--install", default="", help="wechat-download-api 目录（默认自动找）")
     parser.add_argument("--db", default="", help="rss.db 路径（默认自动找）")
     args = parser.parse_args()
 
-    base = args.api.rstrip("/")
     install = find_install(args.install)
     database = find_db(args.db, install)
+    # 端口不写死：5000 在 macOS 上被「隔空播放接收器」占着是常态，启动脚本
+    # 会自动换端口并同步改 .env，这里跟着 .env 走才不会查错地方。
+    base = (args.api or f"http://127.0.0.1:{read_port(install)}").rstrip("/")
     verdict: list[str] = []
     now = time.time()
 

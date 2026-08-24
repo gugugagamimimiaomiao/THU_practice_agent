@@ -30,7 +30,8 @@
 `.env` 里当前需要动的几项：
 
 ```bash
-SITE_URL=http://localhost:5000     # 图片代理拼地址用，本机跑就这个
+SITE_URL=http://localhost:5000     # 图片代理拼地址用；换端口时要和 PORT 一起改
+PORT=5000                          # macOS 上 5000 常被「隔空播放接收器」占着，启动脚本会自动换
 RSS_POLL_INTERVAL=3600             # 轮询间隔（秒）
 ARTICLES_PER_POLL=10               # 每号每轮拉几批列表
 RSS_FETCH_FULL_CONTENT=true        # 轮询时顺带抓全文，保持 true
@@ -38,7 +39,9 @@ PROXY_URLS=                        # SOCKS5 代理池，见第五节
 WEBHOOK_URL=                       # 企业微信机器人；填了才会收到登录过期预警
 ```
 
-起来之后：`http://localhost:5000/api/health` 应该返回 `{"status":"healthy", ...}`；或者直接跑体检脚本（见第三节末尾）。
+> **端口**：macOS 自带的「隔空播放接收器」（进程名 `ControlCe`）常年占着 5000，直接起会报 `address already in use`。`启动.command` 会自己发现这件事，按 5001 → 5002 → 5050 → 5678 → 8123 挑一个空的，并把 `.env` 里的 `PORT` 和 `SITE_URL` 一起改掉，然后把实际地址打在屏幕上。**下面写 5000 的地方，都以启动脚本实际输出的端口为准**；`wda_check.py` 也是读 `.env` 里的 `PORT`，不写死。
+
+起来之后：`http://localhost:5000/api/health` 应该返回 `{"status":"healthy", ...}`；或者直接跑体检脚本（见第三节末尾），它会自己找对端口。
 
 **扫码登录**：浏览器打开 `http://localhost:5000/login.html`，用**公众号管理员的微信**扫码。凭证写进 `.env`，**有效期约 4 天**，过期后所有对微信的调用都返回 `success:false` 并提示重新扫码（`ret=200003 / 200040`）。配了 `WEBHOOK_URL` 会在到期前 24 小时和 6 小时各推一次。
 
@@ -55,7 +58,7 @@ python3 scripts/wda_collector.py \
     --output data/exports/wda_batch.jsonl
 
 # 它跑在别的机器 / Docker 里：走 HTTP
-python3 scripts/wda_collector.py --api http://127.0.0.1:5000 \
+python3 scripts/wda_collector.py --api http://127.0.0.1:5001 \
     --output data/exports/wda_batch.jsonl
 ```
 
@@ -106,7 +109,8 @@ python3 scripts/wda_check.py
 - 把产出的记录喂给 `domain.extract_project`，能正常解析出地点、招募对象、联系人等字段，两种读法结果一致。
 - 仓库全量测试 271 条通过（含新增的 14 条）。
 - `启动.command` 走了一遍完整流程：建 venv、装依赖、起服务、等健康检查、按登录态决定打开哪一页；第二次运行会跳过装依赖并认出服务已在跑；`停止.command` 停得掉、重复停不报错。（在 Linux 沙箱验证，macOS 上唯一的差别是 `open` 命令能真的把浏览器打开。）
-- `wda_check.py` 的各条判断都造数据验过：未登录、订阅号一篇没拿到、日志里出现 `ret=200013 / freq control`、图形验证计数——都能认出来并给出对应结论。
+- `wda_check.py` 的各条判断都造数据验过：未登录、订阅号一篇没拿到、日志里出现 `ret=200013 / freq control`、图形验证计数——都能认出来并给出对应结论；端口从 `.env` 读，服务换到 5001 后它自己跟过去。
+- 三个已经在实机踩到并修掉的坑：pip 连不上 PyPI（自动换清华/阿里/腾讯镜像）、`~/.zshrc` 里的代理指着一个没开的端口（探活后临时绕过，不改配置文件）、5000 被占（自动改用 5001 并同步 `.env` 的 `PORT` 和 `SITE_URL`）。三条路径都在沙箱里造场景验过。
 
 ## 五、没验证的部分，以及为什么要当回事
 
