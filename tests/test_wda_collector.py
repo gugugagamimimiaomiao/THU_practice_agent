@@ -12,13 +12,16 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
+import wda_collector  # noqa: E402
 from wda_collector import (  # noqa: E402
     collect_images,
     html_to_text,
     iso_date,
     markdown_to_text,
+    parse_link_line,
     parse_since,
     read_from_db,
+    read_from_links,
     unproxy,
 )
 
@@ -138,6 +141,86 @@ class ReadFromDbTest(unittest.TestCase):
         finally:
             connection.close()
         self.assertEqual(count, 2)
+
+
+class LinkLineTest(unittest.TestCase):
+    """链接清单来源不一，三种写法都得认。"""
+
+    def test_bare_url(self):
+        self.assertEqual(
+            parse_link_line("https://mp.weixin.qq.com/s/A"), ("", "https://mp.weixin.qq.com/s/A")
+        )
+
+    def test_account_then_url(self):
+        self.assertEqual(
+            parse_link_line("清华大学社会实践\thttps://mp.weixin.qq.com/s/A"),
+            ("清华大学社会实践", "https://mp.weixin.qq.com/s/A"),
+        )
+
+    def test_jsonl_line_from_wewe_export(self):
+        line = '{"source_account": "清华紫荆之声", "source_url": "https://mp.weixin.qq.com/s/A", "title": "x"}'
+        self.assertEqual(parse_link_line(line), ("清华紫荆之声", "https://mp.weixin.qq.com/s/A"))
+
+    def test_blank_comment_and_garbage_are_skipped(self):
+        for line in ("", "   ", "# 注释", "这一行没有链接", "{坏掉的 json"):
+            self.assertIsNone(parse_link_line(line))
+
+
+class ReadFromLinksTest(unittest.TestCase):
+    """不碰网络：把 post_article 换掉，验证解析、重试和失败可见。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.path = Path(self.temp.name) / "links.txt"
+        self.path.write_text(
+            "https://mp.weixin.qq.com/s/OK\n"
+            "清华大学社会实践 https://mp.weixin.qq.com/s/SLOW\n"
+            "https://mp.weixin.qq.com/s/DEAD\n",
+            "utf-8",
+        )
+        self.calls: list[str] = []
+        self.original = wda_collector.post_article
+
+        def fake_post(base, url, timeout=180):
+            self.calls.append(url)
+            if "SLOW" in url and self.calls.count(url) == 1:
+                return {"success": False, "error": "文章获取过快，请0秒后重试（防风控）"}
+            if "DEAD" in url:
+                return {"success": False, "error": "触发微信安全验证。"}
+            return {"success": True, "data": {
+                "title": "招募通知",
+                "plain_content": "正文" * 100,
+                "images": [PROXIED],
+                "author": "清华大学学生社团",
+                "publish_time": 1787453409,
+            }}
+
+        wda_collector.post_article = fake_post
+
+    def tearDown(self):
+        wda_collector.post_article = self.original
+        self.temp.cleanup()
+
+    def rows(self):
+        return list(read_from_links(self.path, "http://x", pause=0, limit=10))
+
+    def test_account_falls_back_to_author(self):
+        rows = self.rows()
+        self.assertEqual(rows[0]["nickname"], "清华大学学生社团")   # 清单里没写，用 author
+        self.assertEqual(rows[1]["nickname"], "清华大学社会实践")   # 清单里写了，以清单为准
+
+    def test_rate_limit_is_waited_out_not_dropped(self):
+        rows = self.rows()
+        self.assertTrue(rows[1]["content_fetched"])
+        self.assertEqual(self.calls.count("https://mp.weixin.qq.com/s/SLOW"), 2)
+
+    def test_failure_keeps_its_reason(self):
+        dead = self.rows()[2]
+        self.assertFalse(dead["content_fetched"])
+        self.assertIn("验证", dead["error"])
+
+    def test_images_are_unproxied(self):
+        self.assertEqual(self.rows()[0]["images"], [ORIGINAL])
 
 
 class JsonlShapeTest(unittest.TestCase):

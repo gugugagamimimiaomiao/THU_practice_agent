@@ -3,6 +3,24 @@
 对象：[tmwgsicp/wechat-download-api](https://github.com/tmwgsicp/wechat-download-api)（AGPL-3.0，FastAPI + SQLite）。
 本文只讲两件事：怎么把它接到实践小搭的投稿链路上，以及**哪些结论是实测的、哪些没验证**。
 
+---
+
+## 结论先写在这里（2026-08-24 实机验证）
+
+> **它的「文章列表」这一半用不了，「抓正文」这一半能用。**
+>
+> 实机登录公众号「临安的雨」，订阅清华大学社会实践、学生会、学生公益、小研在线四个号，
+> 手动触发一次轮询，结果是四个号**全部** `ret=200013 err_msg='freq control'`，文章 0 篇。
+> 这和 `WERSS_MIGRATION.md` 里 `we-mp-rss` 的结局完全一致——换了工具，撞的是同一个
+> `appmsgpublish` 接口。公众号搜索（`searchbiz`）全程 200 OK，所以不是登录态或账号的问题。
+>
+> **因此定位改为：不做发现，只做正文回补。** WeWe RSS 继续负责发现文章链接（它的弱项恰好
+> 是抓正文容易 429），这个工具用 `POST /api/article` 按链接抓全文和图片——那条路径走
+> curl_cffi 直接读文章页，不经过被频控的列表接口。对接见第三节的 `--links` 模式。
+>
+> 列表接口是否只是时间窗口限流，需要**隔天低频重试一次**才知道；在那之前不要加号、
+> 不要缩短轮询间隔。`.env` 里的 `RSS_POLL_INTERVAL` 已经从 1 小时改成 6 小时。
+
 ## 一、它和现在的 WeWe RSS 差在哪
 
 | | WeWe RSS（现主链路） | wechat-download-api |
@@ -69,7 +87,7 @@ python3 scripts/import_articles.py data/exports/wda_batch.jsonl --check   # 自�
 python3 scripts/push_article.py    data/exports/wda_batch.jsonl           # 投稿
 ```
 
-适配器做了这些事，都有测试覆盖（`tests/test_wda_collector.py`，14 条）：
+适配器做了这些事，都有测试覆盖（`tests/test_wda_collector.py`，22 条）：
 
 - **增量游标**：上次导到哪存在 `data/wda_state.json`，第二次跑只出新文章；`--since 2026-08-01` 可覆盖。
 - **图片地址还原**：它入库时把图换成了 `http://localhost:5000/api/image?url=…` 的本机代理地址，这种地址服务器那边打不开。适配器一律还原成 `mmbiz.qpic.cn` 原图，OCR 才拉得到。
@@ -84,6 +102,37 @@ python3 scripts/push_article.py    data/exports/wda_batch.jsonl           # 投�
 ```cron
 30 8 * * * cd ~/practice-xiaoda-mvp && python3 scripts/wda_collector.py --db ~/wechat-download-api/data/rss.db --output data/exports/wda_daily.jsonl && python3 scripts/push_article.py data/exports/wda_daily.jsonl >> ~/wda.log 2>&1
 ```
+
+### `--links` 模式：列表被频控时的主力用法
+
+给一份文章链接清单，逐条走 `POST /api/article` 抓全文和图，产出同样的投稿 JSONL。
+**不碰 `appmsgpublish`，所以不受 `ret=200013` 影响。**
+
+```bash
+python3 scripts/wda_collector.py --links data/exports/urls.txt \
+    --links-api http://127.0.0.1:5001 \
+    --output data/exports/wda_links.jsonl
+```
+
+清单每行三种写法都认，因为来源不一样：
+
+```text
+# 裸链接：公众号名用文章页里的 js_name 兜底
+https://mp.weixin.qq.com/s/AbCdEf
+# 带公众号名（空格或 Tab 分隔），以清单里写的为准
+清华大学社会实践	https://mp.weixin.qq.com/s/GhIjKl
+# WeWe 导出的 JSONL 可以直接喂进来
+{"source_account": "清华紫荆之声", "source_url": "https://mp.weixin.qq.com/s/MnOpQr"}
+```
+
+几个约定：
+
+- **默认 13 秒一条**。服务端限单 IP 5 次/分钟，13 秒刚好不撞。想快就把 `.env` 里的
+  `RATE_LIMIT_PER_IP` 调大再用 `--pause 5`；但对微信那侧的间隔由 `RATE_LIMIT_ARTICLE_INTERVAL`
+  管，不建议低于 3 秒，没配代理时更不建议。
+- **撞限频不丢条**：服务端返回「请 N 秒后重试」时按它说的等，最多重试两次。
+- **失败原因会打出来**，触发验证、登录失效、文章被删是三种不同的处理方式，不能混成一个失败计数。
+- 链接是人挑好的，所以**默认不做招募标题预筛**；要筛加 `--filter-titles`。
 
 ### 体检：`scripts/wda_check.py`
 
@@ -107,16 +156,24 @@ python3 scripts/wda_check.py
 - `data/rss.db` 自动建表，`articles` 表结构与上面描述一致。
 - 造了 3 条样例文章（一条完整招募、一条总结回顾、一条正文未抓到）写进它的库，两种读法（SQLite / HTTP）跑通，产出的 JSONL **过了 `import_articles.py --check`**，两种读法的 `images` 完全一致、正文只差段落空行。
 - 把产出的记录喂给 `domain.extract_project`，能正常解析出地点、招募对象、联系人等字段，两种读法结果一致。
-- 仓库全量测试 271 条通过（含新增的 14 条）。
+- 仓库全量测试 279 条通过（含新增的 22 条）。
 - `启动.command` 走了一遍完整流程：建 venv、装依赖、起服务、等健康检查、按登录态决定打开哪一页；第二次运行会跳过装依赖并认出服务已在跑；`停止.command` 停得掉、重复停不报错。（在 Linux 沙箱验证，macOS 上唯一的差别是 `open` 命令能真的把浏览器打开。）
 - `wda_check.py` 的各条判断都造数据验过：未登录、订阅号一篇没拿到、日志里出现 `ret=200013 / freq control`、图形验证计数——都能认出来并给出对应结论；端口从 `.env` 读，服务换到 5001 后它自己跟过去。
+- `--links` 模式用一个仿真服务端验过：三种清单写法都能解析、公众号名缺失时回退到 `author`、
+  撞限频时按服务端说的秒数等待后重试成功、触发验证的那条保留原因不静默丢弃、图片地址还原、
+  产出过 `import_articles.py --check`。**真实文章链接上的表现要在你机器上跑才算数**——
+  沙箱没有登录态。
 - 三个已经在实机踩到并修掉的坑：pip 连不上 PyPI（自动换清华/阿里/腾讯镜像）、`~/.zshrc` 里的代理指着一个没开的端口（探活后临时绕过，不改配置文件）、5000 被占（自动改用 5001 并同步 `.env` 的 `PORT` 和 `SITE_URL`）。三条路径都在沙箱里造场景验过。
 
 ## 五、没验证的部分，以及为什么要当回事
 
 **这些都需要一个真实的公众号登录态才能验证，沙箱里做不到，别当成已验证结论：**
 
-1. **历史列表接口仍然是 `appmsgpublish`**。就是 2026-07-30 之后让 `we-mp-rss` 持续返回 `ret=200013 / freq control` 的那个接口（见 `WERSS_MIGRATION.md`）。更关键的是：这个请求走的是**普通 httpx，没有 TLS 指纹模拟、不走代理池**（`utils/rss_poller.py` 的 `_fetch_article_list`、`routes/articles.py`）。宣传里的抗风控只作用在**正文抓取**上（`utils/http_client.py` 走 curl_cffi + 代理池）。所以"它能绕开频控"这件事，**没有证据，得你登录后实测**。
+1. ~~**历史列表接口仍然是 `appmsgpublish`**~~ —— **2026-08-24 已实测，确认被频控**，见文首结论。
+   当初的判断依据仍然成立、也解释了原因：这个请求走的是**普通 httpx，没有 TLS 指纹模拟、不走代理池**
+   （`utils/rss_poller.py` 的 `_fetch_article_list`、`routes/articles.py`），宣传里的抗风控只作用在
+   **正文抓取**上（`utils/http_client.py` 走 curl_cffi + 代理池）。**仍未验证的是**：这个频控是
+   时间窗口限流还是长期封，要靠隔天低频重试来区分。
 2. 代码里**没有对 `ret=200013` 的专门处理**——列表接口非 0 返回一律记一条 warning 然后返回空列表。真撞上频控，表现是"轮询很正常但一直没有新文章"，不会报错。**这一点要盯日志**：`docker compose logs -f` 或 `logs/` 里搜 `WeChat API error`。
 3. **验证码触发 8 次会自动把该公众号拉黑**（`utils/rss_store.py`，阈值写死 8），之后轮询直接跳过它。被拉黑的号在 `/blacklist.html` 里看和解封。第一次跑完记得去看一眼，别让某个号悄悄黑了。
 4. **代理池**：`RSS_FETCH_FULL_CONTENT=true` 且订阅多的时候，官方明确建议配 2–3 个 SOCKS5 代理。你自己没有代理就先把订阅号数量压到四个、`RSS_POLL_INTERVAL` 拉到 3600 以上，观察几天再加。
@@ -124,13 +181,26 @@ python3 scripts/wda_check.py
 6. **它要求你有公众号**。没有的话整条路走不通，这是硬前提。
 7. 隐私上比 WeWe 好一些：不再有第三方中转，凭证只落本机 `.env`。但 `.env` 里就是可用的登录态，**别提交、别外传**，权限设 `0600`。
 
-## 六、建议的推进顺序
+## 六、当前的推进顺序（列表已确认被频控后）
 
-1. 双击 `启动.command`，用**公众号管理员微信**扫码。
-2. 在自动打开的 `rss.html` 里**只订阅 1 个号**（建议"清华大学学生社团"）。
-3. 等一轮轮询（默认 1 小时），跑 `python3 scripts/wda_check.py`：
-   - **有正文** → 频控这关过了，继续第 4 步。
-   - **轮询过但一篇没拿到 / 日志里有 200013** → 当天停手，别加号也别缩短轮询间隔，WeWe 那条链路先别停。
-4. 跑 `wda_collector.py` 导一批，再 `import_articles.py --check`，人工看几条正文对不对得上原文。
-5. 没问题再把订阅加到四个号，观察两三天，每天跑一次 `wda_check.py` 看黑名单和验证码计数。
-6. 稳定之后再考虑用它替掉 WeWe 的日更，并在 `README.md` / `WEWE_DEPLOYMENT.md` 里更新主链路说明。
+**今天**：双击 `停止.command`。不加号、不重试、不缩短间隔——重试只会把限制拖长。
+
+**从明天起，两条线并行。**
+
+线一，把它当正文抓取器用起来（不受频控影响，随时可做）：
+
+1. 从 WeWe 那边导出一批链接，或手工整理一份清单。
+2. `python3 scripts/wda_collector.py --links 清单文件 --output data/exports/wda_links.jsonl`
+3. `python3 scripts/import_articles.py data/exports/wda_links.jsonl --check`，人工抽看几条正文。
+4. 没问题就 `push_article.py` 投稿。
+
+线二，每天**只测一次**列表接口，判断 200013 是临时限流还是长期封：
+
+1. 双击 `启动.command`（`RSS_POLL_INTERVAL` 已改成 6 小时）。
+2. 在 `rss.html` 点一次「立即轮询」，**只点一次**。
+3. `python3 scripts/wda_check.py` 看结论。
+4. 还是 200013 → 当天到此为止。连着三四天都是 → 按长期封处理，列表这条路放弃，
+   `--links` 模式留作正文回补的常规手段。
+5. 某天通了 → 那就是时间窗口限流，再按"只订一个号、观察两三天"的节奏加回来。
+
+全程 WeWe 那条链路不要停——它现在仍是唯一的发现来源。

@@ -38,6 +38,7 @@ from html import unescape
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Iterable
+from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
 
@@ -221,6 +222,114 @@ def read_from_api(base: str, since: int, limit: int, page: int, pause: float) ->
         cursor = next_cursor
 
 
+def parse_link_line(line: str) -> tuple[str, str] | None:
+    """一行 → (公众号名, 链接)。公众号名可以没有。
+
+    认三种写法，因为上游来源不一样：WeWe 导出的是 JSONL，手工整理的多半是
+    裸链接，从表格里粘的常带一列公众号名。
+    """
+    line = line.strip()
+    if not line or line.startswith("#"):
+        return None
+    if line.startswith("{"):
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            return None
+        url = str(row.get("source_url") or row.get("url") or "").strip()
+        return (str(row.get("source_account") or "").strip(), url) if url else None
+    parts = line.replace("\t", " ").split()
+    urls = [part for part in parts if part.startswith("http")]
+    if not urls:
+        return None
+    url = urls[0]
+    account = " ".join(part for part in parts if part != url).strip().strip(",，")
+    return account, url
+
+
+def post_article(base: str, url: str, timeout: int = 180) -> dict[str, Any]:
+    payload = json.dumps({"url": url}).encode("utf-8")
+    request = Request(
+        f"{base.rstrip('/')}/api/article",
+        data=payload,
+        headers={"Content-Type": "application/json", "User-Agent": "Practice-Xiaoda/1.0"},
+        method="POST",
+    )
+    with urlopen(request, timeout=timeout) as response:
+        return json.load(response)
+
+
+def read_from_links(links_path: Path, base: str, pause: float, limit: int) -> Iterable[dict[str, Any]]:
+    """逐条 POST /api/article 抓正文。
+
+    这条路径不碰 appmsgpublish，因此不受 ret=200013 频控影响——列表接口被限
+    的时候，只要能从别处拿到链接（WeWe、手工整理），这里照样能抓到全文和图。
+
+    服务端自带三层限频：全局 10 次/分、单 IP 5 次/分、文章间隔 3 秒。撞上了
+    它会返回中文的「请 N 秒后重试」，这里照它说的等，而不是把这一条丢掉。
+    """
+    base = base.rstrip("/")
+    produced = 0
+    for raw_line in links_path.read_text("utf-8", "replace").splitlines():
+        if produced >= limit:
+            return
+        parsed = parse_link_line(raw_line)
+        if not parsed:
+            continue
+        account, url = parsed
+
+        payload: dict[str, Any] = {}
+        error = ""
+        for attempt in range(3):
+            try:
+                payload = post_article(base, url)
+            except (URLError, HTTPError, OSError) as exc:
+                error = f"{type(exc).__name__}: {exc}"
+                break
+            if payload.get("success"):
+                error = ""
+                break
+            error = str(payload.get("error") or "未知错误")
+            wait = re.search(r"(\d+)\s*秒后重试", error)
+            if wait and attempt < 2:
+                time.sleep(int(wait.group(1)) + 1)
+                continue
+            break
+
+        data = payload.get("data") or {}
+        text = str(data.get("plain_content") or "").strip()
+        if not text and data.get("content"):
+            text = html_to_text(str(data["content"]))
+        images = [unproxy(str(item)) for item in (data.get("images") or []) if str(item).startswith("http")]
+
+        publish_time = int(data.get("publish_time") or 0)
+        if not publish_time and data.get("publish_time_str"):
+            try:
+                publish_time = int(
+                    datetime.strptime(str(data["publish_time_str"]), "%Y-%m-%d %H:%M:%S")
+                    .replace(tzinfo=CST).timestamp()
+                )
+            except ValueError:
+                publish_time = 0
+
+        produced += 1
+        yield {
+            "id": produced,
+            # 没给公众号名时用 author：它是从文章页的 js_name / var nickname 抓的，
+            # 多数公众号文章里就是公众号名本身。
+            "nickname": account or str(data.get("author") or "").strip(),
+            "title": str(data.get("title") or "").strip(),
+            "link": url,
+            "publish_time": publish_time,
+            "content_fetched": bool(text or images),
+            "raw_text": text,
+            "images": images[:24],
+            "error": error,
+        }
+        if pause:
+            time.sleep(pause)
+
+
 def read_from_db(db_path: Path, since: int, limit: int) -> Iterable[dict[str, Any]]:
     """只读打开 rss.db，用 plain_content（最接近原文的纯文本）。"""
     uri = f"file:{db_path}?mode=ro"
@@ -290,8 +399,11 @@ def existing_urls(database: Path) -> set[str]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     source = parser.add_mutually_exclusive_group()
-    source.add_argument("--api", default="", help="wechat-download-api 地址，如 http://127.0.0.1:5000")
+    source.add_argument("--api", default="", help="wechat-download-api 地址，如 http://127.0.0.1:5001")
     source.add_argument("--db", default="", help="它的 SQLite 路径，如 …/wechat-download-api/data/rss.db")
+    source.add_argument("--links", default="", help="一份文章链接清单，逐条抓正文（不受列表接口频控影响）")
+    parser.add_argument("--links-api", default="http://127.0.0.1:5001", help="--links 模式下的服务地址")
+    parser.add_argument("--filter-titles", action="store_true", help="--links 模式下也做招募标题预筛（默认不筛）")
     parser.add_argument("--output", default="data/exports/wda_batch.jsonl", help="JSONL 输出路径")
     parser.add_argument("--state", default="data/wda_state.json", help="增量游标文件")
     parser.add_argument("--since", default="", help="覆盖游标：2026-08-01 或 unix 时间戳")
@@ -303,8 +415,13 @@ def main() -> int:
     parser.add_argument("--no-state", action="store_true", help="不读也不写游标文件")
     args = parser.parse_args()
 
-    if not args.api and not args.db:
-        args.api = "http://127.0.0.1:5000"
+    if not args.api and not args.db and not args.links:
+        args.api = "http://127.0.0.1:5001"
+    if args.links:
+        # 链接是人挑好的，游标和标题预筛都不该再插一脚。
+        args.no_state = True
+        if args.pause == 0.0:
+            args.pause = 13.0  # 服务端单 IP 限 5 次/分钟，13 秒一条刚好不撞
 
     state_path = ROOT / args.state if not Path(args.state).is_absolute() else Path(args.state)
     state: dict[str, Any] = {}
@@ -316,20 +433,30 @@ def main() -> int:
 
     since = parse_since(args.since) if args.since else int(state.get("next_since") or 0)
 
-    if args.db:
+    if args.links:
+        links_path = Path(args.links).expanduser()
+        if not links_path.is_absolute():
+            links_path = (ROOT / args.links) if not links_path.exists() else links_path
+        records = read_from_links(links_path, args.links_api, args.pause, args.limit)
+        mode = f"links {links_path} → {args.links_api}"
+    elif args.db:
         records = read_from_db(Path(args.db).expanduser(), since, args.limit)
         mode = f"sqlite {args.db}"
     else:
         records = read_from_api(args.api, since, args.limit, max(1, min(200, args.page)), args.pause)
         mode = f"api {args.api}"
 
-    title_filter = None if args.all_titles else load_filter()
+    if args.links:
+        title_filter = load_filter() if args.filter_titles else None
+    else:
+        title_filter = None if args.all_titles else load_filter()
     seen = existing_urls(Path(args.dedupe_db) if Path(args.dedupe_db).is_absolute() else ROOT / args.dedupe_db)
 
     output_path = Path(args.output) if Path(args.output).is_absolute() else ROOT / args.output
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     counts = {"scanned": 0, "written": 0, "no_content": 0, "too_short": 0, "filtered": 0, "duplicate": 0, "bad_url": 0}
+    failures: list[str] = []
     highest = since
     with output_path.open("w", encoding="utf-8") as handle:
         for record in records:
@@ -345,6 +472,10 @@ def main() -> int:
                 continue
             if not record["content_fetched"]:
                 counts["no_content"] += 1
+                # 抓不到的原因必须看得见：触发验证、登录过期和文章被删要分开处理，
+                # 混在一个「失败 N 条」里没法决定下一步。
+                if record.get("error") and len(failures) < 5:
+                    failures.append(f"{record['link'][-24:]}  {record['error'][:90]}")
                 continue
 
             text = record["raw_text"].strip()
@@ -382,6 +513,10 @@ def main() -> int:
         "扫描 {scanned} 篇 / 写出 {written} 篇（正文未抓到 {no_content}，"
         "正文过短且无图 {too_short}，标题预筛掉 {filtered}，已入库 {duplicate}，链接不合法 {bad_url}）".format(**counts)
     )
+    if failures:
+        print("抓不到正文的前几条：")
+        for line in failures:
+            print(f"  {line}")
     print(f"输出：{output_path}")
     if counts["written"]:
         print(f"下一步自查：python3 scripts/import_articles.py {output_path} --check")
