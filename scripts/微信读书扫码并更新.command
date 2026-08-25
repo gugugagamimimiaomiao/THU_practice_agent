@@ -12,6 +12,25 @@ command -v python3 >/dev/null 2>&1 || {
   printf "\n按回车关闭。"; read -r _; exit 1
 }
 
+# 原来的构建产物在 /private/tmp 下，被系统清掉过一次。没设 WEWE_SERVER_DIR 时
+# 先在几个持久位置里找一份可用的，找到就用，省得每次手动传环境变量。
+if [ -z "${WEWE_SERVER_DIR:-}" ]; then
+  for CANDIDATE in "$(cd .. && pwd)/wewe-rss-src/apps/server" \
+                   "$HOME/wewe-rss/apps/server" \
+                   "/private/tmp/wewe-rss-eval/apps/server"; do
+    if [ -f "$CANDIDATE/dist/main.js" ] && [ -f "$CANDIDATE/client/index.hbs" ]; then
+      export WEWE_SERVER_DIR="$CANDIDATE"
+      printf "%s✓ 用这份构建：%s%s\n\n" "$GREEN" "$CANDIDATE" "$NC"
+      break
+    fi
+  done
+  if [ -z "${WEWE_SERVER_DIR:-}" ]; then
+    printf "%s✗ 没找到可用的 WeWe 构建产物。%s\n" "$RED" "$NC"
+    printf "%s  先双击「WeWe重建.command」把服务端建出来，再回来跑这个。%s\n" "$YELLOW" "$NC"
+    printf "\n按回车关闭。"; read -r _; exit 1
+  fi
+fi
+
 echo "========================================"
 echo " 第 1 步 · 刷新前的现状"
 echo "========================================"
