@@ -7,6 +7,13 @@ GREEN=$'\033[0;32m'; YELLOW=$'\033[1;33m'; RED=$'\033[0;31m'; NC=$'\033[0m'
 STATE_BEFORE="${TMPDIR:-/tmp}/wewe-state-before.json"
 STATE_AFTER="${TMPDIR:-/tmp}/wewe-state-after.json"
 
+# 整窗输出留一份到 data/logs/。出问题时不用你手抄屏幕，我这边能直接读。
+LOG_DIR="$(pwd)/data/logs"
+mkdir -p "$LOG_DIR"
+RUN_LOG="$LOG_DIR/wewe-run.log"
+exec > >(tee "$RUN_LOG") 2>&1
+printf "本次输出同时写到 %s\n\n" "$RUN_LOG"
+
 command -v python3 >/dev/null 2>&1 || {
   printf "%s✗ 没找到 python3，先在终端跑 xcode-select --install%s\n" "$RED" "$NC"
   printf "\n按回车关闭。"; read -r _; exit 1
@@ -41,13 +48,33 @@ echo
 echo "========================================"
 echo " 第 2 步 · 扫码"
 echo "========================================"
+# 4000 被别的东西占着的话，下面那句 curl 会连上一个不是 WeWe 的服务，
+# 报错会变得莫名其妙。先说清楚谁在占。
+if command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP:4000 -sTCP:LISTEN >/dev/null 2>&1; then
+  printf "%s! 4000 端口已经有东西在听：%s\n" "$YELLOW" "$NC"
+  lsof -nP -iTCP:4000 -sTCP:LISTEN | sed 's/^/    /'
+  printf "%s  如果那是上一次没关干净的 WeWe，可以直接用；不是的话先把它停掉。%s\n\n" "$YELLOW" "$NC"
+fi
 printf "%s接下来会打开 WeWe 的账号页。点「添加读书账号」，用微信扫二维码。%s\n" "$YELLOW" "$NC"
-printf "%s扫完这个窗口会自己往下走，别关。%s\n\n" "$YELLOW" "$NC"
+printf "%s扫完这个窗口会自己往下走，别关。%s\n" "$YELLOW" "$NC"
+printf "%s浏览器没自动弹出来的话，手动打开：http://127.0.0.1:4000/dash/accounts%s\n\n" "$YELLOW" "$NC"
 
 if bash scripts/wewe_scan_and_refresh.sh; then
   RESULT=0
 else
   RESULT=$?
+fi
+
+# 服务起不来时，真正的原因在这个日志里，而屏幕上只会看到一句
+# "did not start on ports 4000-4005"。直接摊开，并留一份到 data/logs/。
+LOGIN_LOG="${TMPDIR:-/tmp}/practice-xiaoda-wewe-login.log"
+if [ -f "$LOGIN_LOG" ]; then
+  cp "$LOGIN_LOG" "$LOG_DIR/wewe-login.log" 2>/dev/null
+  if [ "$RESULT" != "0" ]; then
+    echo
+    printf "%s服务端日志（最后 25 行）：%s\n" "$YELLOW" "$NC"
+    tail -25 "$LOGIN_LOG" | sed 's/^/    /'
+  fi
 fi
 
 echo
