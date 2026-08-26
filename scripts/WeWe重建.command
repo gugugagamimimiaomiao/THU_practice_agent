@@ -137,13 +137,25 @@ fi
 # --- 6. Prisma（必须用 sqlite 那份 schema）---------------------------------
 # 默认 schema 是 mysql，postinstall 生成的也是 mysql 版，拿来连 sqlite 会在
 # 运行时报 provider 不匹配。
-echo "  正在生成 Prisma 客户端（sqlite）…"
-if ! ( cd "$SERVER" && npx prisma generate --schema=prisma-sqlite/schema.prisma ) 2>&1 | tail -3; then
-  die "prisma generate 失败"
+# 判断成没成，要看**引擎二进制**在不在：@prisma/client 这个包本身就带
+# .prisma/client/index.js 这些桩文件，光看目录存不存在会误判成功。
+engine_present() {
+  find "$SRC/node_modules" "$SERVER/node_modules" -name 'libquery_engine*' -print -quit 2>/dev/null | grep -q .
+}
+
+if engine_present; then
+  ok "Prisma 客户端已经生成过了，跳过"
+else
+  echo "  正在生成 Prisma 客户端（sqlite）…"
+  ( cd "$SERVER" && npx prisma generate --schema=prisma-sqlite/schema.prisma ) 2>&1 | tail -4
+  if ! engine_present; then
+    warn "引擎没下下来（binaries.prisma.sh 国内经常连不上），换 npmmirror 镜像再试"
+    export PRISMA_ENGINES_MIRROR="https://registry.npmmirror.com/-/binary/prisma"
+    ( cd "$SERVER" && npx prisma generate --schema=prisma-sqlite/schema.prisma ) 2>&1 | tail -4
+  fi
+  engine_present || die "两个源都没拿到 Prisma 引擎。把 Clash 打开再双击一次，通常就过了。"
+  ok "Prisma 客户端就绪"
 fi
-[ -d "$SERVER/node_modules/.prisma/client" ] || [ -d "$SRC/node_modules/.prisma/client" ] ||
-  die "prisma generate 跑完了但没生成客户端。它要从 binaries.prisma.sh 下引擎，被墙或断网都会卡在这。"
-ok "Prisma 客户端就绪"
 
 # --- 7. 后端 -------------------------------------------------------------
 echo "  正在编译后端…"
