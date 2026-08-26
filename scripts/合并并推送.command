@@ -118,7 +118,52 @@ printf "  确认推送吗？(y/N) "
 read -r ANSWER
 case "$ANSWER" in
   y|Y)
-    git "${GIT_NP[@]}" push origin HEAD:main && ok "推送成功" || die "推送失败，原因在上面"
+    if git "${GIT_NP[@]}" push origin HEAD:main; then
+      ok "推送成功"
+    else
+      echo
+      warn "推送被拒。合并结果还在本地，一点没丢 —— 只是没推上去。"
+      URL=$(git remote get-url origin)
+      case "$URL" in
+        https://github.com/*)
+          echo
+          echo "  用 HTTPS 推被 GitHub 拒绝，通常是钥匙串里那个凭证过期了，"
+          echo "  或者是个没有写权限的 token（细粒度 PAT 常见）。"
+          echo "  你们 README 里给的另一种方式是 SSH，先测一下通不通："
+          echo
+          SSH_OUT=$(ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -T git@github.com 2>&1)
+          printf "    %s\n" "$SSH_OUT" | head -3
+          if printf "%s" "$SSH_OUT" | grep -q "successfully authenticated"; then
+            SSH_URL=$(printf "%s" "$URL" | sed -E 's#https://github.com/#git@github.com:#')
+            echo
+            ok "SSH 是通的"
+            printf "  把 origin 换成 %s 再推一次吗？(y/N) " "$SSH_URL"
+            read -r SW
+            case "$SW" in
+              y|Y)
+                git remote set-url origin "$SSH_URL"
+                if git push origin HEAD:main; then
+                  ok "推送成功（已改用 SSH）"
+                else
+                  warn "SSH 也没推上去，原因在上面"
+                fi
+                ;;
+              *) warn "没换。想手动换：git remote set-url origin $SSH_URL" ;;
+            esac
+          else
+            echo
+            echo "  SSH 也没认证成功。两条路："
+            echo "    1) 配 SSH key：https://github.com/settings/keys"
+            echo "    2) 刷新 HTTPS 凭证："
+            echo "       printf 'protocol=https\\nhost=github.com\\n\\n' | git credential-osxkeychain erase"
+            echo "       然后重新推，会让你输用户名和 token（token 需要 repo 写权限）"
+            echo "    另外确认一下：你这个 GitHub 账号对 Sonnette51/THU_practice_agent 有没有写权限。"
+          fi
+          ;;
+        *) echo "  远端是 $URL，检查一下这个地址和你的权限。" ;;
+      esac
+      printf "\n按回车关闭。"; read -r _; exit 1
+    fi
     ;;
   *)
     warn "没推。合并结果已经在本地了，想推的时候再双击一次，或者跑 git push origin HEAD:main"
