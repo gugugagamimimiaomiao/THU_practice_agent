@@ -1,6 +1,9 @@
 import importlib.util
+import json
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 SPEC = importlib.util.spec_from_file_location("wewe_collector", Path(__file__).parents[1] / "scripts" / "wewe_collector.py")
 MODULE = importlib.util.module_from_spec(SPEC)
@@ -32,6 +35,19 @@ class WeweCollectorTests(unittest.TestCase):
             self.assertEqual(MODULE.discover_feeds(), {"清华大学社会实践": "MP_1"})
         finally:
             MODULE.get_json = original
+
+    def test_empty_completed_scan_is_successful(self):
+        with tempfile.TemporaryDirectory() as folder, patch.object(MODULE, "collect_articles", return_value=([], [], [])):
+            original_output_dir = MODULE.OUTPUT_DIR
+            MODULE.OUTPUT_DIR = Path(folder)
+            try:
+                with patch("sys.argv", ["wewe_collector.py", "collect", "清华大学乡村振兴工作站"]):
+                    self.assertEqual(MODULE.main(), 0)
+                batch = json.loads(next(Path(folder).glob("articles_*.json")).read_text(encoding="utf-8"))
+                self.assertEqual(batch["articles"], [])
+                self.assertFalse(batch["partial"])
+            finally:
+                MODULE.OUTPUT_DIR = original_output_dir
 
 
 if __name__ == "__main__":

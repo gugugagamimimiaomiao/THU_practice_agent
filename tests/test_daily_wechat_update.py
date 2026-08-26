@@ -21,6 +21,7 @@ class DailyWeChatCandidateTests(unittest.TestCase):
     def test_daily_job_limits_default_sources_to_current_priority_accounts(self):
         self.assertEqual(daily_wechat_update.CURRENT_PRIORITY_ACCOUNTS, (
             "清华大学学生会", "清华大学学生社团", "清华紫荆之声", "清华大学学生公益",
+            "清华大学乡村振兴工作站",
         ))
         self.assertNotIn("清华大学社会实践", daily_wechat_update.CURRENT_PRIORITY_ACCOUNTS)
         self.assertNotIn("无限之声", daily_wechat_update.CURRENT_PRIORITY_ACCOUNTS)

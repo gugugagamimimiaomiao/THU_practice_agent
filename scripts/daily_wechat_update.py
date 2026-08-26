@@ -26,15 +26,11 @@ from domain import extract_project, merge_project_versions  # noqa: E402
 from opportunity_filter import candidate_decision  # noqa: E402
 from wechat_ingest import collector_credentials_present  # noqa: E402
 from wechat_image_ocr import OCRResult, ocr_wechat_images  # noqa: E402
-from wechat_sources import DEFAULT_ACCOUNTS  # noqa: E402
+from wechat_sources import DAILY_PRIORITY_ACCOUNTS  # noqa: E402
 
 
-CURRENT_PRIORITY_ACCOUNTS = (
-    "清华大学学生会",
-    "清华大学学生社团",
-    "清华紫荆之声",
-    "清华大学学生公益",
-)
+# Backward-compatible name for callers that import this script directly.
+CURRENT_PRIORITY_ACCOUNTS = DAILY_PRIORITY_ACCOUNTS
 
 
 def report_progress(percent: int, stage: str, label: str, *, current: int | None = None, total: int | None = None) -> None:

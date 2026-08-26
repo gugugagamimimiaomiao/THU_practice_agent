@@ -89,22 +89,25 @@
       "name": "水利宣传",
       "article_url": "https://mp.weixin.qq.com/s/dcu34PHLqZExz7Xmom8q-A",
       "feed_id": "MP_WXS_3097533624",
-      "status": "queued_for_subscription",
-      "verified_at": "2026-08-13"
+      "status": "subscribed",
+      "verified_at": "2026-08-13",
+      "activated_at": "2026-08-16"
     },
     {
       "name": "环境人ENV",
       "article_url": "https://mp.weixin.qq.com/s/R56eOQPesR5stM1mKcLLgQ",
       "feed_id": "MP_WXS_3877838551",
-      "status": "queued_for_subscription",
-      "verified_at": "2026-08-13"
+      "status": "subscribed",
+      "verified_at": "2026-08-13",
+      "activated_at": "2026-08-25"
     },
     {
       "name": "机械之声",
       "article_url": "https://mp.weixin.qq.com/s/DD1TKJOY5tghS_KFX54krA",
       "feed_id": "MP_WXS_3087048900",
-      "status": "queued_for_subscription",
-      "verified_at": "2026-08-13"
+      "status": "subscribed",
+      "verified_at": "2026-08-13",
+      "activated_at": "2026-08-25"
     },
     {
       "name": "THU臻于至善",
@@ -189,8 +192,20 @@
       "feed_id": "MP_WXS_3094827638",
       "status": "queued_for_subscription",
       "verified_at": "2026-08-13"
+    },
+    {
+      "name": "清华大学乡村振兴工作站",
+      "article_url": "https://mp.weixin.qq.com/s/eoXdY2AYjf06n9zuu3011g",
+      "feed_id": "MP_WXS_3902491811",
+      "cover": "http://wx.qlogo.cn/mmhead/LPLYlyQ5GAoblSRgiaoQ800FibBNnBeyTWFMBZDFzruDdiaIV7zFJSZ0ibZVNLAP69UoGOMPItoHKsA/0",
+      "intro": "清华大学乡村振兴工作站官方公众号",
+      "update_time": 1786532462,
+      "status": "subscribed",
+      "verified_at": "2026-08-16",
+      "activated_at": "2026-08-16"
     }
   ],
+  "pending_resolution": [],
   "pending_canonical_url": [
     "清华大学",
     "建院学生会THU",
