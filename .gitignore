@@ -10,3 +10,5 @@ data/collection_quality_report.json
 data/collection_quality_samples.jsonl
 data/wechat_backfill_state.json
 .env
+data/logs/
+data/wda_state.json
