@@ -161,6 +161,64 @@ class WeChatIngestTests(unittest.TestCase):
             self.assertEqual(project["image_ocr_status"], "pending")
             self.assertEqual(len(project["image_sources"]), 1)
 
+    def test_corpus_only_saves_the_article_but_never_creates_a_project(self):
+        """回采历史材料时只入语料，绝不进推荐。
+
+        采集方要抓历史实践总结、纪实、志愿故事来扩充写作范例。这些文章早就
+        结束了，进推荐没意义；而"让分类器自己判断"这条路不够稳——实测 28 篇
+        「XX基地资源推介」里有 24 篇被判成了可报名机会。调用方自己知道这批
+        是历史材料，给个显式开关比让规则去猜可靠。
+        """
+        url = "https://mp.weixin.qq.com/s?mid=corpus-only"
+        # 分段、够长，跟真实推送一样——不分段或太短的会被写作范例门槛挡掉，
+        # 那样这条测试验的就不是 corpus_only 而是门槛本身了。
+        recap = "\n".join([
+            "七月的风裹着热浪。支队一行十二人从北京出发，辗转两天抵达西部小城，"
+            "开始了为期十四天的社会实践。出发前我们做了很多准备，但真正落地后才发现，"
+            "书本上的认识和眼前的现实之间，隔着的东西比想象中多。",
+            "第一天我们走访了当地小学。教室的窗户还是老式木框，黑板边缘已经磨白，"
+            "但孩子们的眼神很亮。我们原本准备的课讲了十分钟就发现节奏不对，当晚重写了一遍。",
+            "第五天，我们完成了第一轮入户问卷，累计走访三十余户人家。有位老人讲了很久"
+            "他年轻时怎么把水引上坡地——这些细节问卷上一格也填不下。",
+            "第十天，我们与当地干部座谈，了解产业帮扶的进展和现实困难。政策文件里干净利落的"
+            "几行字，落到具体的村和人身上，会遇到各种意想不到的阻力。",
+            "回望这十四天，我们收获的远比付出的多。实践不只是走出去看，"
+            "更是带着问题去想、带着答案回来。",
+        ])
+        with tempfile.TemporaryDirectory() as folder:
+            database = Database(Path(folder) / "test.db")
+            result = import_article_text(
+                database,
+                {"title": "实践总结丨十四天的西部记忆", "source_account": "清华大学社会实践",
+                 "source_url": url},
+                recap,
+                corpus_only=True,
+            )
+            self.assertEqual(result["status"], "corpus_only")
+            self.assertFalse([p for p in database.list_projects() if p["source_url"] == url],
+                             "只入语料的文章不该生成项目卡")
+
+            # 但它必须进得了写作语料——这正是回采它的目的。
+            from corpus import load_corpus
+            self.assertIn("实践总结丨十四天的西部记忆",
+                          [s.title for s in load_corpus(database).samples])
+
+    def test_corpus_only_skips_extraction_even_for_recruitment_looking_text(self):
+        """开关是显式的，不受正文内容影响。
+
+        历史材料里常有"当时我们招募了 20 名队员，报名方式是扫码"这种回忆性
+        表述。如果还让分类器判一次，这类会被抽成一个早就不存在的项目。
+        """
+        url = "https://mp.weixin.qq.com/s?mid=corpus-recruit-words"
+        text = ("那年我们面向全校招募队员，报名截止是 2020 年 6 月 30 日，"
+                "报名方式是扫描海报二维码。最终 20 人成行。") * 8
+        with tempfile.TemporaryDirectory() as folder:
+            database = Database(Path(folder) / "test.db")
+            result = import_article_text(
+                database, {"title": "五年前的那个夏天", "source_url": url}, text, corpus_only=True)
+            self.assertEqual(result["status"], "corpus_only")
+            self.assertFalse([p for p in database.list_projects() if p["source_url"] == url])
+
     def test_marked_correction_overrides_even_when_it_says_less(self):
         """数据维护方明确标记的订正必须生效，哪怕新版本信息更少。
 

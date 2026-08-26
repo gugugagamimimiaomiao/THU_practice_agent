@@ -328,6 +328,7 @@ def import_article_text(
     log_channel: str = "ingest",
     origin_label: str = "外部导入",
     correction: bool = False,
+    corpus_only: bool = False,
 ) -> dict[str, Any]:
     """把一篇已经拿到正文的文章走完入库管线。
 
@@ -351,6 +352,39 @@ def import_article_text(
     按补充规则会被判成信息量下降而拒绝。那样订正就悄悄失效了——最糟的一类
     bug，因为看起来一切正常。所以给一个显式开关，而不是让规则去猜。
     """
+    if corpus_only:
+        # 只入语料，不碰机会库。
+        #
+        # 采集方要回采历史实践总结、纪实、志愿故事来扩充写作范例，这些文章
+        # 早就结束了，进推荐没有意义。而"让分类器自己判断"这条路不够稳：
+        # 实测 28 篇「XX基地资源推介」里有 24 篇被判成了可报名机会——标题
+        # 不带招募词、正文只是提了一句往年招募过队员，照样卡线通过。
+        #
+        # 所以给调用方一个显式开关，比让规则去猜可靠。规则再准也只是概率，
+        # 而采集方自己知道这批是历史材料。
+        article_id = database.insert_article({
+            **metadata, "raw_text": raw_text, "collector_status": "corpus_only",
+        })
+        # 语料库对正文长度有门槛：太短的学不到写法，会被过滤掉。这时候如果
+        # 只回一句"已保存"，推的人会以为进了范例库，其实白推了——所以把
+        # 结论直接说出来，让他知道这条要不要重抓。
+        from corpus import MIN_SAMPLE_LENGTH
+        usable = len(raw_text.strip()) >= MIN_SAMPLE_LENGTH
+        database.log(log_channel, "已收入写作语料（不进入机会库）", {
+            "article_id": article_id, "title": metadata.get("title", "")[:60],
+            "usable_as_sample": usable,
+        })
+        return {
+            "status": "corpus_only",
+            "article_id": article_id,
+            "usable_as_sample": usable,
+            "action_required": "" if usable else (
+                f"正文只有 {len(raw_text.strip())} 字，短于写作范例的最低长度 "
+                f"{MIN_SAMPLE_LENGTH} 字，不会被当作范例检索出来。原文已存档，"
+                "需要的话重抓完整正文再推一次。"),
+            "truthfulness_note": "按调用方声明只作写作语料保存，未做项目抽取，不会出现在推荐里。",
+        }
+
     article_id = database.insert_article({**metadata, "raw_text": raw_text, "collector_status": collector_status})
     decision = candidate_decision({"title": metadata.get("title", ""), "content": raw_text})
     if not decision["candidate"]:

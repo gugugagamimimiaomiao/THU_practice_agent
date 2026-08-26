@@ -1,4 +1,17 @@
-# Shell 脚本和 Docker 相关文件必须是 LF。
+# 仓库里一律存 LF，检出到工作区也是 LF。
+#
+# 不加这条会怎样：某次提交前 git status 报了 67 个文件被改，其中包括 railway.json、
+# Dockerfile.werss 这些谁都没碰过的。--numstat 显示每个文件的增删行数一模一样，
+# xxd 一看，仓库里是 0a，工作区变成了 0d0a——Windows 侧某个工具重写了文件行尾符。
+# core.autocrlf 没设，Git 就把这 CRLF 当成真改动原样提交。
+# 一万行的假 diff 会把真正的三行改动埋掉，代码评审也就没法做了。
+#
+# text=auto 会自己认出二进制文件并跳过（本仓库当前全是文本）。
+* text=auto eol=lf
+
+# 下面几条比通配符更具体，Git 取最后匹配的规则，所以保留着做显式声明：
+# 这些文件传到 Linux 上一旦带 CRLF，会直接报
+# "bad interpreter: /usr/bin/env bash^M"，Dockerfile 里的 RUN 也会出问题。
 # Windows 上 core.autocrlf=true 会在检出时把它们转成 CRLF，脚本传到 Linux 后
 # 会报 "bad interpreter: /usr/bin/env bash^M"，Dockerfile 里的 RUN 也会出问题。
 *.sh            text eol=lf

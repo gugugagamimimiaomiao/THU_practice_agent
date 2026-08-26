@@ -55,8 +55,13 @@ def run_pending_ocr(database: Database, *, apply: bool) -> int:
         project = database.get_project(summary["id"])
         if project and project.get("image_ocr_status") == "pending" and project.get("image_sources"):
             pending.append(project)
-    print(f"待识别配图的项目 {len(pending)} 条\n")
-    if not pending:
+
+    # 语料文章（判为非招募、或明确只入语料的）不生成项目卡，但它们同样可能是
+    # 图片型推送——正文只有两三百字、内容全在长图里。这类不识别的话，语料库
+    # 里躺着的是一篇没内容的壳子。
+    corpus_pending = _articles_needing_ocr(database)
+    print(f"待识别配图：项目 {len(pending)} 条，语料文章 {len(corpus_pending)} 篇\n")
+    if not pending and not corpus_pending:
         return 0
 
     done = 0
@@ -101,9 +106,63 @@ def run_pending_ocr(database: Database, *, apply: bool) -> int:
             database.upsert_project(fresh, note="配图 OCR 后重抽")
         done += 1
 
+    corpus_done = _ocr_corpus_articles(database, corpus_pending, apply=apply)
+
     print()
-    print(f"完成 {done} 条" + ("" if apply else "（预演，没有写库；确认后加 --apply）"))
+    print(f"完成：项目 {done} 条，语料文章 {corpus_done} 篇"
+          + ("" if apply else "（预演，没有写库；确认后加 --apply）"))
     return 0
+
+
+def _articles_needing_ocr(database: Database) -> list[dict]:
+    """有配图、正文却短得不像完整文章的语料——信息多半在图里。
+
+    只取每个链接最新的那一版；已经含 OCR 段落的跳过，避免重复识别。
+    """
+    from corpus import MIN_SAMPLE_LENGTH
+
+    latest: dict[str, dict] = {}
+    with database.connect() as db:
+        for row in db.execute(
+            "SELECT id, source_url, title, source_account, raw_text, image_sources "
+            "FROM articles WHERE image_sources IS NOT NULL AND image_sources != '[]' ORDER BY id"
+        ):
+            record = dict(row)
+            try:
+                record["images"] = json.loads(record["image_sources"] or "[]")
+            except json.JSONDecodeError:
+                continue
+            if record["images"]:
+                latest[record["source_url"] or f"__id{record['id']}"] = record
+    return [
+        record for record in latest.values()
+        if len((record["raw_text"] or "").strip()) < MIN_SAMPLE_LENGTH
+        and "【公众号配图 OCR】" not in (record["raw_text"] or "")
+    ]
+
+
+def _ocr_corpus_articles(database: Database, records: list[dict], *, apply: bool) -> int:
+    """给语料文章补 OCR：识别出的文字并回 raw_text，让它够得上范例门槛。"""
+    from wechat_image_ocr import ocr_wechat_images
+
+    done = 0
+    for record in records:
+        result = ocr_wechat_images(record["images"], cookie=os.getenv("WECHAT_COOKIE", ""))
+        if not result.runtime_available:
+            print(f"── 未装 OCR 引擎，跳过：{(record['title'] or '')[:36]}")
+            continue
+        before = len((record["raw_text"] or "").strip())
+        if not result.text.strip():
+            print(f"── {(record['title'] or '')[:36]}  {len(record['images'])} 张图未识别出文字")
+            continue
+        merged = f"{record['raw_text']}\n\n【公众号配图 OCR】\n{result.text}"
+        print(f"── {(record['title'] or '')[:36]}")
+        print(f"     正文 {before} 字 → {len(merged.strip())} 字（{result.completed}/{len(record['images'])} 张识别到文字）")
+        if apply:
+            with database.connect() as db:
+                db.execute("UPDATE articles SET raw_text=? WHERE id=?", (merged, record["id"]))
+        done += 1
+    return done
 
 
 def _latest_article(database: Database, source_url: str) -> dict | None:
@@ -121,7 +180,14 @@ def describe(project: dict, field: str) -> str:
         return (project.get("eligibility") or {}).get("restriction_text") or "(空)"
     if field == "location":
         return (project.get("location") or {}).get("detail") or "(空)"
-    return str(project.get(field) or "(空)")
+    if field == "reimbursement":
+        has = (project.get("reimbursement") or {}).get("has_reimbursement")
+        label = {True: "有", False: "无", None: "未写明"}[has]
+        return f"{label}｜{(project.get('reimbursement') or {}).get('text', '')[:30]}"
+    value = project.get(field)
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)[:200] or "(空)"
+    return str(value or "(空)")
 
 
 def main() -> int:
@@ -191,8 +257,43 @@ def main() -> int:
             "source_url": url,
             "input_type": article["input_type"] or "copied_text",
         })
+
+        # 配图相关的字段 extract_project 不产出，不带过来就等于把图丢了。
+        for field in ("image_sources", "image_ocr_status"):
+            if project.get(field) and not fresh.get(field):
+                fresh[field] = project[field]
+
+        # 配图还没识别的项目，不能因为重抽而被放行。
+        #
+        # 重抽只看正文，看不到配图。而这类项目当初被标成 needs_review，正是
+        # 因为"关键信息在 24 张配图里，配图尚未识别，正文没有报名截止、资格或
+        # 报名方式"——正文本来就是空的。让它凭正文重抽变成 published，等于把
+        # 这道闸门冲开，把一张没有报名信息的卡片当成可报名项目推给学生。
+        #
+        # 2026-08-21 的预演里有两条正好撞上：组织部、一站式服务部两个学生骨干
+        # 招募，都会从 needs_review 变成 published。
+        if (project.get("status") == "needs_review"
+                and project.get("image_sources")
+                and project.get("image_ocr_status") != "completed"
+                and fresh.get("status") == "published"):
+            fresh["status"] = "needs_review"
+            note = "配图尚未识别，正文信息不足，重抽不改变待核验状态"
+            if note not in fresh.get("risk_notes", []):
+                fresh["risk_notes"] = list(fresh.get("risk_notes", [])) + [note]
+
+        # 比对字段不再手工维护。
+        #
+        # 这张清单漏过两次，每次的后果都一样：`if not diffs: continue` 会连
+        # 写库一起跳过，规则明明改对了，结果没进数据库。
+        #   - 2026-08-21 修经费误抽，五条项目的错值原样留在库里（缺 reimbursement）
+        #   - 同一天修摘要重复标题，一条都没写进去（缺 summary）
+        # 两次都是"我以为我列全了"。改成自动取全部内容字段，只排掉身份和
+        # 时间戳这类本来就该保留的，漏字段这个错就不可能再犯。
+        volatile = {"id", "created_at", "updated_at", "article_id", "version",
+                    "image_sources", "image_ocr_status"}
+        fields = sorted((set(project) | set(fresh)) - volatile)
         diffs = [(f, describe(project, f), describe(fresh, f))
-                 for f in WATCHED + ("eligibility", "location")
+                 for f in WATCHED + tuple(f for f in fields if f not in WATCHED)
                  if describe(project, f) != describe(fresh, f)]
         tally_before[project["status"]] += 1
         tally_after[fresh["status"]] += 1

@@ -127,6 +127,11 @@ class Database:
                     raw_text TEXT,
                     collector_status TEXT NOT NULL,
                     collector_warning TEXT,
+                    -- 原文配图的 URL（JSON 数组）。以前只把图片挂在项目卡上，
+                    -- 而判为非招募或只入语料的文章根本不生成项目卡，图片就被
+                    -- 静默丢掉了——实测采集方推来 290 个 URL，只存下 15 个。
+                    -- 图片型推送的关键信息全在图里，丢了就没法补 OCR。
+                    image_sources TEXT,
                     created_at TEXT NOT NULL
                 );
 
@@ -172,7 +177,21 @@ class Database:
                 );
                 """
             )
+        self._add_missing_columns()
         self.seed_if_empty()
+
+    # 后加的列。CREATE TABLE IF NOT EXISTS 对已存在的表什么都不做，所以老库
+    # 必须显式补列——线上那个库是几周前建的，直接改建表语句对它无效。
+    _LATE_COLUMNS = (
+        ("articles", "image_sources", "TEXT"),
+    )
+
+    def _add_missing_columns(self) -> None:
+        with self.connect() as db:
+            for table, column, column_type in self._LATE_COLUMNS:
+                existing = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+                if column not in existing:
+                    db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
 
     def seed_if_empty(self) -> None:
         # 换成真实数据之后，把演示项目删干净再重启，本方法会把它们又灌回来——
@@ -203,8 +222,8 @@ class Database:
             cursor = db.execute(
                 """
                 INSERT INTO articles(input_type, source_account, source_url, title, raw_text,
-                                     collector_status, collector_warning, created_at)
-                VALUES(?,?,?,?,?,?,?,?)
+                                     collector_status, collector_warning, image_sources, created_at)
+                VALUES(?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     payload.get("input_type", "copied_text"),
@@ -214,6 +233,10 @@ class Database:
                     payload.get("raw_text", ""),
                     payload.get("collector_status", "success"),
                     payload.get("collector_warning", ""),
+                    # 原文归档必须连图片一起存。图片型推送的关键信息全在图里，
+                    # URL 丢了就再也补不了 OCR——只能回头求采集方重抓。
+                    json.dumps([str(url).strip() for url in (payload.get("images") or []) if str(url).strip()],
+                               ensure_ascii=False),
                     now_iso(),
                 ),
             )

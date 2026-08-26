@@ -125,6 +125,9 @@ def main() -> int:
                         help="放行过短正文（默认拦截，只在确认对方就是给了短通知时用）")
     parser.add_argument("--review-all", action="store_true",
                         help="强制全部进人工核验队列，不让任何一条直接进正式推荐")
+    parser.add_argument("--corpus-only", action="store_true",
+                        help="整批只作写作语料：保存文章供写作参考，不做项目抽取、不进推荐。"
+                             "用于回采历史实践总结、纪实、志愿故事")
     args = parser.parse_args()
 
     if not args.path.is_file():
@@ -186,6 +189,7 @@ def main() -> int:
                 collector_status="collector_file",
                 log_channel="ingest",
                 origin_label="采集文件导入",
+                corpus_only=args.corpus_only or bool(record.get("corpus_only")),
             )
         except Exception as exc:  # 单条炸掉不该带走整批
             tally["exception"] += 1
@@ -195,6 +199,9 @@ def main() -> int:
 
         status = result["status"]
         tally[status] += 1
+        if status == "corpus_only":
+            print(f"[{position}/{len(pending)}] 已入语料  {metadata['title'][:30]}")
+            continue
         if status == "imported":
             project = result["project"]
             if args.review_all and project["status"] == "published":

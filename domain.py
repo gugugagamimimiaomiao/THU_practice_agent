@@ -28,6 +28,75 @@ KNOWN_LOCATIONS = [
     "海南", "香港", "澳门", "台湾", "线上",
 ]
 
+# 区域词 → 它覆盖的省级行政区。
+#
+# 为什么需要这层映射：KNOWN_LOCATIONS 是一张省份平铺表，学生说「京津冀」「长三角」
+# 「西部」的时候，一个词都命中不了，抽出来的 preferred_locations 是空列表——于是
+# 「想找京津冀附近的调研或支教类实践」和完全不提地点走的是同一条代码路径。
+# 实测（2026-08-20，线上真实库）：那句话推出来的前两条是湖南新宁和河南，而库里
+# 明明有北京和河北的项目。
+#
+# 范围按国家统计局的经济区划走，「西部」用西部大开发的口径（含广西、内蒙古）。
+# 边界有争议的地方（比如内蒙古算不算华北）不追求学术精确——这里的用途是理解
+# 学生想去哪儿，宁可多覆盖一个省，也别把人想要的地方漏掉。
+LOCATION_GROUPS: dict[str, tuple[str, ...]] = {
+    "京津冀": ("北京", "天津", "河北"),
+    "环渤海": ("北京", "天津", "河北", "山东", "辽宁"),
+    "长三角": ("上海", "江苏", "浙江", "安徽"),
+    "珠三角": ("广东",),
+    "粤港澳": ("广东", "香港", "澳门"),
+    "华北": ("北京", "天津", "河北", "山西", "内蒙古"),
+    "东北": ("辽宁", "吉林", "黑龙江"),
+    "华东": ("上海", "江苏", "浙江", "安徽", "福建", "江西", "山东"),
+    "华中": ("河南", "湖北", "湖南"),
+    "华南": ("广东", "广西", "海南"),
+    "西南": ("重庆", "四川", "贵州", "云南", "西藏"),
+    "西北": ("陕西", "甘肃", "青海", "宁夏", "新疆"),
+    "西部": ("重庆", "四川", "贵州", "云南", "西藏", "陕西", "甘肃",
+             "青海", "宁夏", "新疆", "广西", "内蒙古"),
+}
+
+# 校内地点在库里是以 detail 字符串存的（「中关村街道（学校周边社区）」
+# 「紫荆学生区（C楼门口）」），province 字段是空的。不做这层补充的话，
+# 问「京津冀」的人看不到这些明明就在北京的项目。
+# 只收录地理上没有歧义的几个，不做泛化猜测。
+CAMPUS_TO_PROVINCE: dict[str, str] = {
+    "紫荆": "北京", "中关村": "北京", "清华园": "北京", "学堂路": "北京",
+}
+
+
+def expand_location_query(text: str) -> tuple[list[str], list[str]]:
+    """从一句话里认出地域意图，返回（用户原话里的地域词，展开后的省份表）。
+
+    返回两个列表是因为它们的用途不同：原话用来跟用户说人话（「符合『京津冀』的
+    有 4 个」），展开后的省份用来做匹配。只留一个的话，要么匹配不上，要么
+    只能干巴巴地回「符合『北京、天津、河北』的有 4 个」。
+    """
+    labels: list[str] = []
+    provinces: list[str] = []
+    for group, members in LOCATION_GROUPS.items():
+        if group in text:
+            labels.append(group)
+            provinces.extend(members)
+    for place in KNOWN_LOCATIONS:
+        if place in text:
+            labels.append(place)
+            provinces.append(place)
+    # 去重但保持出现顺序，让后面拼出来的说明文字跟用户的说法同序。
+    return list(dict.fromkeys(labels)), list(dict.fromkeys(provinces))
+
+
+def project_location_text(project: dict[str, Any]) -> str:
+    """把一个项目所有跟地点有关的字段拼成一条待匹配文本，并补上校内地名的省份。"""
+    location = project.get("location") or {}
+    parts = [str(location.get(key, "") or "") for key in ("province", "city", "detail", "mode")]
+    text = " ".join(parts)
+    for campus, province in CAMPUS_TO_PROVINCE.items():
+        if campus in text and province not in text:
+            text += " " + province
+    return text
+
+
 KNOWN_DEPARTMENTS = [
     "建筑学院", "土木系", "水利系", "环境学院", "机械系", "精仪系", "能源与动力工程系",
     "车辆学院", "工业工程系", "电机系", "电子系", "计算机系", "自动化系", "集成电路学院",
@@ -57,7 +126,10 @@ IDENTITY_TERMS = ["清华学生", "清华师生", "学生党员", "共青团员"
 
 THEME_KEYWORDS = {
     "乡村振兴": ["乡村振兴", "农村", "乡村", "产业振兴", "基层治理"],
-    "教育": ["教育", "支教", "学习", "课程", "儿童"],
+    # 「讲课/授课/上课/带课」并进教育主题：实测「主要做技术支持，不讲课」
+    # 推出来的第一条正是支教项目——「不讲课」这句话完全没生效，因为词表里
+    # 只有"支教""课程"，认不出"讲课"说的是同一件事。
+    "教育": ["教育", "支教", "学习", "课程", "儿童", "讲课", "授课", "上课", "带课", "教课"],
     "科技创新": ["科技", "人工智能", "AI", "数字化", "创新", "科普"],
     "生态环保": ["生态", "环保", "环境", "低碳", "生物多样性"],
     "公益志愿": ["公益", "志愿", "服务", "助老", "帮扶"],
@@ -418,11 +490,46 @@ def _is_lead_in(line: str) -> bool:
     return bool(tail) and tail.endswith(("：", ":")) and len(tail) <= 12
 
 
+# 「面向全校」既可能是"招谁"，也可能是"这个岗位服务谁"。三条线上真实原文：
+#
+#   ① 运营“我在清华听讲座”平台，面向全校同学提供一站式讲座信息交流与检索服务
+#      → 岗位职责。却因为含「面向全校」被捞成参与资格，还把 explicit_no_restriction
+#        设成了 true。
+#   ② “星空计划”面向全校社团会长及优秀骨干，匹配全方位资源，开展为期一年的系统培养
+#      → 这才是真的资格说明。
+#   ③ 我们是社团运行的“数字大脑”，负责规划、建设并持续运营全校学生社团的一站式信息平台
+#      → 岗位职责。「全校学生」其实是「全校学生社团」的一部分，说的是平台服务谁。
+#
+# 第一版规则是"整行里有职责词、又没有招募词就跳过"，结果两个方向都错：
+# ② 因为有「开展」被误杀，③ 因为段尾出现「欢迎」而逃过。
+#
+# 真正的判据是**位置**：职责词出现在宽松关键词之前，说明这一行的主语是岗位在
+# 做什么，「面向全校」只是它的宾语；出现在之后则不影响前半句"招谁"的语义。
+# 一条规则同时管住这三种。
+_ELIGIBILITY_AS_DUTY = ("负责", "运营", "承办", "开展", "对接", "维护", "统筹",
+                        "建设", "规划", "工作内容", "岗位职责", "主要职责")
+
+
+def _find_eligibility_loose(lines: list[str]) -> str:
+    for line in lines:
+        hits = [line.find(keyword) for keyword in ELIGIBILITY_LOOSE if keyword in line]
+        if not hits:
+            continue
+        first_hint = min(hits)
+        duty_before = any(
+            0 <= line.find(term) < first_hint for term in _ELIGIBILITY_AS_DUTY
+        )
+        if duty_before:
+            continue  # 这一行在说岗位干什么，「面向全校」是它的宾语
+        return line.strip()
+    return ""
+
+
 def _extract_eligibility(lines: list[str]) -> tuple[dict[str, Any], str]:
     # 分两轮找：先找带明确标签的行，找不到再退回宽松线索。
     # 不能一轮找完——_find_line 返回的是第一个命中行，而开场白往往排在
     # 真正的「参与资格：」那一行前面，一轮下来永远是套话赢。
-    line = _find_line(lines, ELIGIBILITY_LABELS) or _find_line(lines, ELIGIBILITY_LOOSE)
+    line = _find_line(lines, ELIGIBILITY_LABELS) or _find_eligibility_loose(lines)
     if line and (line in _ELIGIBILITY_HEADING_ONLY or _is_lead_in(line)):
         # 「报名要求：我们希望你是：」这类引导行本身没有信息，真正的条件在后面
         # 几行。真实数据里抽到过，还因为非空被当成已确认的资格说明显示出去。
@@ -445,10 +552,48 @@ def _extract_eligibility(lines: list[str]) -> tuple[dict[str, Any], str]:
     }, line
 
 
+# 「经费」两个字出现在岗位职责里的写法。这些是**要干的活**，不是**给的待遇**。
+#
+# 线上实测抓到的原文：「负责各类相关经费的报销和代发」——这是校团委宣传部
+# 学生骨干的岗位职责，却被读成"这个项目提供报销"，直接展示成「有经费支持」。
+# 学生看到会理解成"参加这个能报销"，正好反了。
+_REIMBURSEMENT_AS_DUTY = (
+    "负责", "承办", "协助办理", "代发", "审批", "审核", "统筹", "对接",
+    "办理报销", "报销工作", "报销流程", "财务", "预算编制", "台账",
+)
+# 反过来，这些写法明确指向参与者拿到什么。
+_REIMBURSEMENT_TO_PARTICIPANT = (
+    "提供", "给予", "补助", "补贴", "承担", "报销往返", "报销交通", "报销费用",
+    "食宿由", "交通由", "全额报销", "实报实销", "人均", "每人", "标准为",
+    "免费", "包食宿", "不收取", "自理",
+    # 「完成项目任务并通过材料审核的支队，可获得 3000 元额外报销额度」——
+    # 这是真待遇，却因为「材料审核」里的"审核"命中职责词被挡掉过。
+    "可获得", "可申请", "发放", "报销额度", "补助标准", "资助",
+)
+
+
+# 在议论花费的高低，不是在说给不给报。
+_REIMBURSEMENT_COST_REMARK = ("费用较高", "成本较高", "开销较大", "价格不菲", "花费不小")
+
+
 def _extract_reimbursement(lines: list[str]) -> tuple[dict[str, Any], str]:
     line = _find_line(lines, ["报销", "补贴", "经费", "交通费", "食宿"])
     if not line:
         return {"has_reimbursement": None, "ratio": None, "amount": None, "text": ""}, ""
+    unknown = ({"has_reimbursement": None, "ratio": None, "amount": None, "text": ""}, "")
+    to_participant = any(term in line for term in _REIMBURSEMENT_TO_PARTICIPANT)
+    # 是职责描述、又没有任何面向参与者的措辞，就当没抽到——宁可标成待确认，
+    # 也不能把「负责报销工作」说成「有经费支持」。
+    if any(term in line for term in _REIMBURSEMENT_AS_DUTY) and not to_participant:
+        return unknown
+    # 「青海……因而食宿费用较高」——这是在解释为什么贵，不是在说给不给报。
+    # 判成"有经费支持"是反的；判成"不报销"也没依据。只能是未写明。
+    if any(term in line for term in _REIMBURSEMENT_COST_REMARK) and not to_participant:
+        return unknown
+    # 「经费保障」这种光秃秃的小标题，正文在下一段。拿它当依据说"有经费支持"，
+    # 等于凭一个栏目名下结论。
+    if len(line.strip(" ：:•·、")) <= 6 and not to_participant and not re.search(r"\d", line):
+        return unknown
     negative = any(term in line for term in ["不报销", "无报销", "费用自理", "不提供补贴"])
     ratio_match = RATIO_RE.search(line)
     amount_match = AMOUNT_RE.search(line)
@@ -532,6 +677,50 @@ def _normalize_notice_lines(lines: list[str]) -> list[str]:
     return merged
 
 
+# 微信页面模板噪音。抓下来的正文开头常带这些。
+# 定义在这里而不是 corpus.py，是因为摘要和语料两边都要用——放两份一定会漂。
+PAGE_BOILERPLATE = (
+    "在小说阅读器读本章", "去阅读", "在小说阅读器中沉浸阅读",
+    "点击上方蓝字", "点击蓝字", "关注我们", "星标我们", "长按识别二维码关注",
+    "预览时标签不可点", "微信扫一扫关注该公众号", "轻点两下取消赞",
+    "继续滑动看下一个", "向上滑动看下一个",
+)
+
+
+def _summarize(lines: list[str], title: str, cleaned: str, account: str = "") -> str:
+    """项目卡上那句摘要。
+
+    原来是 `"".join(lines[1:4])`——无分隔地拼前三行。公众号推送开头常把标题
+    拆成几行重复排版，于是真实数据上出现过这种摘要：
+
+        机械系“宝庆微光”赴湖南新宁支教实践支队招募实践招募机械系“宝庆微光”赴湖南新宁支教实践支队招募
+
+    同一个标题读三遍，既没信息又显得系统坏了。跳过与标题重复的行，
+    留下真正有内容的那几句，并且用分隔符连接。
+    """
+    core = re.sub(r"[\s|｜丨\-—－·]", "", title)
+    picked: list[str] = []
+    for line in lines[1:12]:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        bare = re.sub(r"[\s|｜丨\-—－·]", "", stripped)
+        # 与标题高度重合的行（标题本身、标题的一段）不带进摘要。
+        if core and (bare in core or core in bare):
+            continue
+        # 跳过标题重复行之后紧接着的往往是公众号名和阅读器提示。第一版没管，
+        # 于是真实数据上的摘要变成了
+        # 「清华大学社会实践 在小说阅读器读本章 去阅读 在小说阅读器中沉浸阅读」。
+        if any(noise in stripped for noise in PAGE_BOILERPLATE):
+            continue
+        if account and bare == re.sub(r"\s", "", account):
+            continue
+        picked.append(stripped)
+        if len(" ".join(picked)) >= 120:
+            break
+    return " ".join(picked)[:260] or cleaned[:260]
+
+
 def extract_project(raw_text: str, metadata: dict[str, Any] | None = None, *, today: date | None = None) -> dict[str, Any]:
     """Extract a conservative project card from copied text or OCR text."""
     metadata = metadata or {}
@@ -579,6 +768,13 @@ def extract_project(raw_text: str, metadata: dict[str, Any] | None = None, *, to
         risk_notes.append("缺少原文链接，发布前需补充来源")
     if demo_data:
         risk_notes.append("演示数据，不可作为真实报名依据")
+    # 离谱的年份基本上意味着抽错了行，或者是导入时留下的脏数据。
+    # 实测里线上挂着一条「报名截止 2036-09-30」的记录，看起来跟真实招募没区别。
+    # 三年是个宽松的界：社会实践的报名周期以周计，跨年的都少见。
+    for label, value in (("报名截止", deadline), ("实践开始", practice_start)):
+        parsed = parse_iso_date(value)
+        if parsed and parsed.year - today.year > 3:
+            risk_notes.append(f"{label}日期是 {value}，距今超过三年——多半是抽取有误或脏数据，需人工核对")
 
     critical_present = 5 - sum(field in uncertain_fields for field in [
         "signup_deadline", "eligibility", "reimbursement", "signup_method", "source_url"
@@ -626,8 +822,12 @@ def extract_project(raw_text: str, metadata: dict[str, Any] | None = None, *, to
         "source_url": source_url,
         "publish_date": metadata.get("publish_date") or None,
         "organizer": organizer,
-        "summary": "".join(lines[1:4])[:260] if len(lines) > 1 else cleaned[:260],
-        "theme_tags": _extract_themes(cleaned),
+        "summary": _summarize(lines, title, cleaned, source_account),
+        # 标题也算进主题：一篇通知里信息量最大的就是标题，
+        # 「…赴湖南新宁支教实践支队招募」写得清清楚楚是支教，而正文可能通篇
+        # 讲行程和保障，一次都没出现"支教"两个字——只看正文会把它标成「综合实践」，
+        # 用户说「不讲课」时就排不掉它。
+        "theme_tags": _extract_themes(f"{title}\n{cleaned}"),
         "practice_start": practice_start,
         "practice_end": practice_end,
         "schedule_segments": schedule_segments,
@@ -700,6 +900,10 @@ class MatchResult:
     reasons: list[str]
     warnings: list[str]
     excluded_reasons: list[str]
+    # 这次提问的地域偏好有没有落在这个项目上。单独拎出来是因为展示层要用它排序、
+    # 也要用它组织说明文字，而从 reasons 里反查字符串（找「匹配地点偏好：」前缀）
+    # 太脆——改一个字的文案就会悄悄失效。
+    location_match: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -708,6 +912,7 @@ class MatchResult:
             "reasons": self.reasons,
             "warnings": self.warnings,
             "excluded_reasons": self.excluded_reasons,
+            "location_match": self.location_match,
         }
 
 
@@ -756,10 +961,34 @@ def score_project(project: dict[str, Any], profile: dict[str, Any], *, today: da
     elif not preferred_themes:
         score += 12
 
+    # ── 显式排他：用户说了"不要 X""只要 Y"，这是指令不是偏好 ──────────────
+    #
+    # 原来地点、主题一律只是加减分，于是「不考虑学生骨干岗位」之后系统照样
+    # 只列学生骨干岗位，「不要拿外地项目凑数」之后照样返回外地项目。
+    # 显式否定必须一票否决，哪怕结果为空——空结果是正确答案，凑数不是。
+    haystack = " ".join([
+        str(project.get("title", "")), str(project.get("summary", "")),
+        project_location_text(project),
+    ])
+    for term in _as_set(profile.get("excluded_terms")):
+        if term in haystack:
+            excluded.append(f"你说了不要「{term}」这类")
+            break
+    for place in _as_set(profile.get("excluded_locations")):
+        if place in project_location_text(project):
+            excluded.append(f"你说了不去{place}")
+            break
+    banned_themes = _as_set(profile.get("excluded_themes")) & _as_set(project.get("theme_tags"))
+    if banned_themes:
+        excluded.append(f"你说了不做{'、'.join(sorted(banned_themes))}这类")
+
     preferred_locations = _as_set(profile.get("preferred_locations"))
-    location = project.get("location", {})
-    location_text = " ".join(str(location.get(k, "")) for k in ["province", "city", "detail", "mode"])
+    location_text = project_location_text(project)
+    if profile.get("location_strict") and preferred_locations:
+        if not any(place in location_text for place in preferred_locations):
+            excluded.append("不在你指定的地区范围内")
     matched_locations = {place for place in preferred_locations if place in location_text}
+    location_match = bool(matched_locations)
     if matched_locations:
         score += 15
         reasons.append(f"匹配地点偏好：{'、'.join(sorted(matched_locations))}")
@@ -792,7 +1021,8 @@ def score_project(project: dict[str, Any], profile: dict[str, Any], *, today: da
     if project.get("demo_data") and not any("演示数据" in warning for warning in warnings):
         warnings.append("这是演示数据，不可作为真实报名依据")
 
-    return MatchResult(project, max(0.0, min(100.0, score)), reasons, warnings, excluded)
+    return MatchResult(project, max(0.0, min(100.0, score)), reasons, warnings, excluded,
+                       location_match=location_match)
 
 
 def recommend_projects(projects: list[dict[str, Any]], profile: dict[str, Any], *, today: date | None = None) -> dict[str, Any]:
@@ -812,13 +1042,47 @@ def recommend_projects(projects: list[dict[str, Any]], profile: dict[str, Any], 
             eligible.append(item)
         else:
             potential.append(item)
-    eligible.sort(key=lambda item: item["score"], reverse=True)
-    potential.sort(key=lambda item: item["score"], reverse=True)
+    # 说了地域偏好的时候，命中的一律排在前面，而不是只靠那 +15 分去挤名次。
+    #
+    # 之前地点纯粹是加分项，+15 分很容易被主题匹配（+25）和时间匹配（+25）盖过去：
+    # 学生问「京津冀附近的支教」，一个湖南的支教项目照样能排在北京的项目前面，
+    # 而且回复里对地域只字不提。学生说了地点，就是把它当筛选条件用的，
+    # 排序必须体现这一点。至于要不要把不匹配的也列出来——列，但要说清楚。
+    def _rank(item: dict[str, Any]) -> tuple[int, float]:
+        return (0 if item.get("location_match") else 1, -item["score"])
+
+    eligible.sort(key=_rank)
+    potential.sort(key=_rank)
     excluded.sort(key=lambda item: item["score"], reverse=True)
+
+    asked_locations = bool(_as_set(profile.get("preferred_locations")))
     return {
         "eligible": eligible,
         "potential": potential,
         "excluded": excluded,
+        # 展示层要靠这几个数字写出「符合的有 N 个」或「一个都没有」，
+        # 而不是在没命中的时候干脆不提地域。
+        "location_asked": asked_locations,
+        "location_matched": sum(1 for item in eligible if item.get("location_match")),
+        "location_matched_all": sum(
+            1 for bucket in (eligible, potential, excluded)
+            for item in bucket if item.get("location_match")
+        ),
+        # 光说「符合的有 4 个，其中 1 个进了推荐」，剩下 3 个的去向仍然是个谜——
+        # 而那正好是追问的下一句。这里把每个符合地点的项目落在哪个桶、
+        # 因为什么落在那里，一并带出去。
+        "location_matched_detail": [
+            {
+                "title": item["project"].get("title", ""),
+                "bucket": name,
+                "why": "；".join(
+                    (item.get("excluded_reasons") or item.get("warnings") or [])[:2]
+                ),
+            }
+            for name, bucket in (("eligible", eligible), ("potential", potential),
+                                 ("excluded", excluded))
+            for item in bucket if item.get("location_match")
+        ],
         "policy": "正式推荐仅包含 published 项目；needs_review 项目单列为潜在机会。",
     }
 

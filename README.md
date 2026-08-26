@@ -37,7 +37,7 @@ py server.py --port 8765
 跑测试：
 
 ```bash
-python3 -m unittest discover -s tests    # Windows: py -m unittest discover -s tests
+python3 -m unittest discover -s tests -t .    # Windows: py -m unittest discover -s tests -t .
 ```
 
 `Makefile` 里的 `make run` / `make test` / `make check` 是同样命令的简写，但 Windows 默认没有 `make`，直接用上面的原始命令即可。

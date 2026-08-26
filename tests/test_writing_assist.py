@@ -121,6 +121,26 @@ class DisplayWordingTests(unittest.TestCase):
         self.database = Database(Path(self.tempdir.name) / "chat.db")
         self.adapter = PracticeChatAdapter(self.database)
 
+    def test_source_links_are_wrapped_so_markdown_cannot_break_them(self):
+        """公众号链接必须包成 Markdown 自动链接，否则会被渲染器拆散。
+
+        在清小搭里实测到的：库里存的是完整链接，页面上却只剩
+        `https://mp.weixin.qq.com/s?s`——`__biz` 的双下划线被当成粗体标记，
+        把后半截 URL 吃掉了。
+
+        这个 bug 纯文本测试看不出来（拿到的链接是完整的），只有在真实界面里
+        才暴露。而「点原文自己核对」是这个产品的核心承诺，链接断了等于承诺落空。
+        """
+        tricky = "https://mp.weixin.qq.com/s?sn=6bc0320d&__biz=MjM5NDcz==&mid=2654153808&idx=1"
+        import_article_text(
+            self.database,
+            {"title": "某支队招募队员", "source_account": "清华大学社会实践", "source_url": tricky},
+            "现面向全校招募队员。\n报名截止：2036年9月10日\n参与资格：全校本科生\n报名方式：扫码",
+        )
+        project = [p for p in self.database.list_projects() if p["source_url"] == tricky][0]
+        detail = self.adapter._project_detail(self.database.get_project(project["id"]))
+        self.assertIn(f"<{tricky}>", detail, "链接没有被包起来，Markdown 会把它拆断")
+
     def test_detail_page_does_not_repeat_placeholder_for_every_field(self):
         """详情页原来每个缺失字段都写一行「待确认」，真实数据上一屏十几个。
 
