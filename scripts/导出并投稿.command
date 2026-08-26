@@ -73,20 +73,47 @@ echo "  筛选：标题先过招募规则；抽字段的活儿仍归服务端 do
 echo
 
 # --- 4. 导出 -------------------------------------------------------------
-echo "  正在导出（要逐篇抓全文，慢，别关窗口）…"
-if ! python3 scripts/wewe_export_handoff.py \
+# 已经导好的文件可以直接复用，跳过重新抓全文：
+#   EXPORT_FILE=data/exports/xxx.jsonl bash scripts/导出并投稿.command
+if [ -n "${EXPORT_FILE:-}" ] && [ -s "$EXPORT_FILE" ]; then
+  OUT="$EXPORT_FILE"
+  ok "复用已导出的文件，跳过抓取：$OUT"
+else
+  echo "  正在导出（要逐篇抓全文，慢，别关窗口）…"
+  python3 scripts/wewe_export_handoff.py \
       "${ARGS[@]}" --since "$SINCE" --need "$NEED" --delay "$DELAY" \
-      --mode current --output "$OUT"; then
-  die "导出失败，原因在上面。若是 429 / 今日小黑屋，今天就到此为止，别重试。"
+      --mode current --output "$OUT"
+  RC=$?
+  # 注意：wewe_export_handoff.py 用退出码 1 表示「没凑够 --need 条」，
+  # 不是出错。判断成没成要看有没有产出文件，不能看退出码。
+  if [ ! -s "$OUT" ]; then
+    if [ "$RC" != "0" ]; then
+      die "导出没有产出文件。若上面是 429 / 今日小黑屋，今天就到此为止，别重试。"
+    fi
+    warn "这次一条都没导出来 —— 最近没有标题过筛的招募类新文章。"
+    printf "\n按回车关闭。"; read -r _; exit 0
+  fi
 fi
-[ -s "$OUT" ] || { warn "这次一条都没导出来 —— 多半是最近没有招募类新文章。"; printf "\n按回车关闭。"; read -r _; exit 0; }
 LINES=$(grep -c . "$OUT")
-ok "导出 $LINES 条 → $OUT"
+if [ "${RC:-0}" != "0" ]; then
+  ok "导出 $LINES 条 → $OUT"
+  warn "没凑够 $NEED 条：满足条件的就这些，不是出错。想扩范围就 DAYS=60 再跑。"
+else
+  ok "导出 $LINES 条 → $OUT"
+fi
 
 # --- 5. 自查 -------------------------------------------------------------
 echo
 echo "  自查（不写库）…"
-python3 scripts/import_articles.py "$OUT" --check || die "自查没过，先按上面的提示修，别投。"
+CHECK_OUT=$(python3 scripts/import_articles.py "$OUT" --check 2>&1)
+printf "%s\n" "$CHECK_OUT"
+USABLE=$(printf "%s" "$CHECK_OUT" | sed -n 's/^可用 \([0-9]*\) 条.*/\1/p' | tail -1)
+[ -n "$USABLE" ] && [ "$USABLE" -gt 0 ] 2>/dev/null ||
+  die "没有一条可用，先按上面的提示修，别投。"
+if printf "%s" "$CHECK_OUT" | grep -q "需要修 [1-9]"; then
+  warn "有几条不合格（多半是正文没抓全）。服务端会按条校验，不合格的不会入库；"
+  warn "想先修再投就现在关掉，处理完用 EXPORT_FILE=$OUT 重跑，不会重新抓全文。"
+fi
 
 # --- 6. 投稿 -------------------------------------------------------------
 echo
