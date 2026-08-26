@@ -14,6 +14,31 @@ RUN_LOG="$LOG_DIR/wewe-run.log"
 exec > >(tee "$RUN_LOG") 2>&1
 printf "本次输出同时写到 %s\n\n" "$RUN_LOG"
 
+# WeWe 服务端用 axios 请求微信读书中转服务，而 axios 在 Node 里会**自动读取**
+# HTTPS_PROXY 这些环境变量。代理软件没开时，二维码请求就会 ECONNREFUSED 到
+# 127.0.0.1:7897 —— 报错出现在 WeWe 页面上，跟这个脚本看着毫无关系。
+# 所以起服务之前先探一下代理端口：活着就走它，死了就在本次运行里清掉。
+export no_proxy="localhost,127.0.0.1,::1${no_proxy:+,$no_proxy}"
+export NO_PROXY="$no_proxy"
+port_alive() { (exec 3<>"/dev/tcp/$1/$2") 2>/dev/null && exec 3<&- 3>&- && return 0; return 1; }
+PROXY_DEAD=""; PROXY_LIVE=""; SEEN=""
+for VALUE in "${https_proxy:-}" "${HTTPS_PROXY:-}" "${http_proxy:-}" "${HTTP_PROXY:-}" \
+             "${all_proxy:-}" "${ALL_PROXY:-}"; do
+  [ -z "$VALUE" ] && continue
+  HP="${VALUE#*://}"; HP="${HP%%/*}"; HP="${HP##*@}"
+  case " $SEEN " in *" $HP "*) continue;; esac
+  SEEN="$SEEN $HP"
+  PH="${HP%%:*}"; PP="${HP##*:}"; [ "$PP" = "$PH" ] && PP=8080
+  if port_alive "$PH" "$PP"; then PROXY_LIVE="$PROXY_LIVE $PH:$PP"; else PROXY_DEAD="$PROXY_DEAD $PH:$PP"; fi
+done
+if [ -n "$PROXY_DEAD" ]; then
+  printf "%s! 环境里的代理%s 没人监听，本次运行清掉它%s\n" "$YELLOW" "$PROXY_DEAD" "$NC"
+  printf "%s  （不清的话 WeWe 取二维码会报 ECONNREFUSED 127.0.0.1:7897）%s\n\n" "$YELLOW" "$NC"
+  unset https_proxy HTTPS_PROXY http_proxy HTTP_PROXY all_proxy ALL_PROXY
+elif [ -n "$PROXY_LIVE" ]; then
+  printf "%s✓ 代理%s 活着，服务照常走它%s\n\n" "$GREEN" "$PROXY_LIVE" "$NC"
+fi
+
 command -v python3 >/dev/null 2>&1 || {
   printf "%s✗ 没找到 python3，先在终端跑 xcode-select --install%s\n" "$RED" "$NC"
   printf "\n按回车关闭。"; read -r _; exit 1
