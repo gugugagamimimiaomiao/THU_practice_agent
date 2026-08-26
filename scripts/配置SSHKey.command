@@ -100,15 +100,25 @@ printf "    %s\n" "$OUT" | head -3
 if printf "%s" "$OUT" | grep -q "successfully authenticated"; then
   WHO=$(printf "%s" "$OUT" | sed -n 's/^Hi \([^!]*\)!.*/\1/p')
   ok "通了，GitHub 认出你是：$WHO"
+  REMOTE=$(git remote get-url origin 2>/dev/null)
+  OWNER=$(printf "%s" "$REMOTE" | sed -E 's#.*[:/]([^/]+)/[^/]+(\.git)?$#\1#')
   echo
-  echo "  接下来把仓库改用 SSH 再推："
-  echo "    cd ~/Desktop/agent/practice-xiaoda-mvp"
-  echo "    git remote set-url origin git@github.com:Sonnette51/THU_practice_agent.git"
-  echo "    git push origin HEAD:main"
+  echo "  当前仓库地址：$REMOTE"
+  echo "  仓库所有者：$OWNER    你的 GitHub 账号：$WHO"
+  echo
+  if [ -n "$WHO" ] && [ "$WHO" = "$OWNER" ]; then
+    ok "账号和仓库所有者对得上，换成 SSH 就能推："
+    echo "    git remote set-url origin git@github.com:$OWNER/$(basename "${REMOTE%.git}").git"
+    echo "    git push origin HEAD:main"
+  else
+    warn "账号和仓库所有者对不上 —— 这才是推不上去的真正原因，换 SSH 也没用。"
+    echo "    要么让 $OWNER 把你加成协作者，"
+    echo "    要么把 origin 换成你自己名下的那个仓库："
+    echo "      git remote set-url origin git@github.com:$WHO/$(basename "${REMOTE%.git}").git"
+    echo "      git push origin HEAD:main"
+  fi
   echo
   echo "  或者直接双击「合并并推送.command」，它会自己发现 SSH 通了并问你要不要切。"
-  echo
-  warn "如果上面认出来的名字不是这个仓库的所有者，那推还是会被拒 —— 换成你自己那个仓库地址。"
 else
   warn "还没通。常见原因：公钥没加成功、加到了别的账号、或者网络被挡。"
   echo "    确认一下 https://github.com/settings/keys 里能看到这把 key。"
