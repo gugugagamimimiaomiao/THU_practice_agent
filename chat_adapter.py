@@ -386,11 +386,28 @@ def _amounts(text: str) -> set[str]:
     return found
 
 
+# 裸年份。喂了原文之后文案会引用「1941 年正式建校」这类历史信息，
+# 这是好事——但也意味着模型有能力编一个同样像真的年份，而原来的正则
+# 只认 20xx 的完整日期，裸年份一个都查不到。
+_BARE_YEAR_RE = re.compile(r"(?<!\d)((?:1[89]|20)\d{2})\s*年")
+
+
+def _years(text: str) -> set[str]:
+    return {m.group(1) for m in _BARE_YEAR_RE.finditer(text)}
+
+
 def unsupported_numbers(draft: str, facts: str) -> list[str]:
-    """生成稿里出现、但在事实来源里查不到的日期和金额。"""
+    """生成稿里出现、但在事实来源里查不到的日期、金额和年份。
+
+    `facts` 要把**所有**给过模型的材料都带上，不能只给抽取字段。
+    自从写推送时把原文一起喂进去，文案就会合法地引用原文里的日期和年份
+    （「1941 年正式建校」）；只对着抽取字段查的话，这些真东西全会被
+    误报成编造，警告一多就没人看了。
+    """
     out = [f"{month}月{day}日" for month, day in sorted(_month_days(draft) - _month_days(facts))]
     out += [item if item.endswith("%") else f"{item}元"
             for item in sorted(_amounts(draft) - _amounts(facts))]
+    out += [f"{year}年" for year in sorted(_years(draft) - _years(facts))]
     return out
 
 
@@ -1731,7 +1748,9 @@ class PracticeChatAdapter:
                 return
             # 数字是最容易被顺手编出来、也最容易被当真的东西。逐个回查项目卡，
             # 查不到出处的当场点名——不拦截，但绝不让它悄悄混过去。
-            invented = unsupported_numbers("".join(written), facts)
+            # 对照的是**给过模型的全部材料**，包括原文。只对抽取字段查的话，
+            # 文案里引用原文的日期和年份会被全部误报。
+            invented = unsupported_numbers("".join(written), f"{facts}\n{source}")
             if invented:
                 yield (
                     "\n\n> **这几个数字在项目卡里查不到出处**："

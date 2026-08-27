@@ -54,6 +54,24 @@ class UnsupportedNumberTests(unittest.TestCase):
         self.assertIn("300元", flagged)
         self.assertIn("45%", flagged)
 
+    def test_year_quoted_from_the_source_article_is_supported(self):
+        """写推送时原文会一并喂给模型，文案引用其中的年份是合法的。
+
+        实测生成的文案里有「新宁一中的前身可追溯到清代金城书院，1941年正式建校」
+        ——这句在原文里逐字存在。如果只拿抽取字段去查，这类真信息会被全部
+        误报成编造，警告一多就没人看了。
+        """
+        source = FACTS + "\n【原文】\n新宁一中的前身可追溯到清代中叶的金城书院，1941 年正式建校。"
+        self.assertEqual(unsupported_numbers("1941年正式建校的新宁一中", source), [])
+
+    def test_invented_year_is_still_flagged(self):
+        source = FACTS + "\n【原文】\n新宁一中 1941 年正式建校。"
+        self.assertIn("1985年", unsupported_numbers("1985年迁入现址", source))
+
+    def test_the_current_year_in_a_full_date_is_not_double_reported(self):
+        # 「2026-08-24」已经按日期比过了，不该再作为裸年份报一次。
+        self.assertEqual(unsupported_numbers("2026-08-24 出发", FACTS), [])
+
     def test_durations_are_not_mistaken_for_money(self):
         # 「为期 8 天」「3 个课时」不是金额，不该被点名。
         self.assertEqual(unsupported_numbers("为期 8 天，共 3 个课时。", FACTS), [])
