@@ -1289,6 +1289,17 @@ def _gateway_hint(area: str) -> str:
     return f"请在 12306、航司/机场官方渠道和地图中查询抵达{area}的高铁/飞机及最后一段进城交通；系统不会把非实时信息写成已确定班次。"
 
 
+# 每种材料真正依赖哪些字段。写报名理由要知道截止和资格；写调研报告框架不需要
+# 知道报销怎么算。不做这个区分的话，所有材料末尾都挂着同一串无关提示。
+_RELEVANT_FIELDS_BY_KIND: dict[str, tuple[str, ...]] = {
+    "application": ("signup_deadline", "eligibility", "signup_method", "practice_dates"),
+    "outreach": ("practice_dates", "location", "organizer"),
+    "interview": ("practice_dates", "location"),
+    "itinerary": ("practice_dates", "location"),
+    "report": ("practice_dates", "location"),
+}
+
+
 def generate_asset(project: dict[str, Any], kind: str, context: dict[str, Any] | None = None) -> dict[str, Any]:
     """Generate safe, editable action drafts without inventing user facts."""
     context = context or {}
@@ -1311,8 +1322,18 @@ def generate_asset(project: dict[str, Any], kind: str, context: dict[str, Any] |
     snapshot = project_snapshot(project)
     title = project.get("title", "该项目")
     warnings = []
-    if project.get("uncertain_fields"):
-        warnings.append(f"生成前仍需核实：{'、'.join(project['uncertain_fields'])}")
+    # 只提这份材料真正用得到的字段，并且用中文标签。
+    #
+    # 原来是把 uncertain_fields 原样拼出去，于是用户看到的是
+    # 「生成前仍需核实：signup_deadline、reimbursement」——英文字段名直接漏给
+    # 学生，而且写调研报告框架跟报名截止、报销有什么关系？一句无关的提示挂在
+    # 材料末尾，只会让人以为系统没做好。
+    relevant = _RELEVANT_FIELDS_BY_KIND.get(kind, ())
+    pending = [name for name in project.get("uncertain_fields", []) if name in relevant]
+    if pending:
+        warnings.append(
+            f"生成前仍需核实：{'、'.join(FIELD_LABELS.get(name, name) for name in pending)}"
+        )
     if project.get("demo_data"):
         warnings.append("当前项目为演示数据，请替换为真实项目后再对外使用")
 
@@ -1469,47 +1490,72 @@ def generate_asset(project: dict[str, Any], kind: str, context: dict[str, Any] |
 每日收尾固定完成：文件命名、双份备份、授权状态标注、次日预约确认和安全报备。
 """
     elif kind == "report":
+        # 这份框架原来除了 H1 里的标题，正文七节一个项目变量都没用——换成任何
+        # 项目输出一字不差。而 theme / work_principle / _location_area() 早就
+        # 算好摆在那儿，隔壁访谈提纲用得好好的。
+        #
+        # 一份不含项目信息的通用学术骨架，网上一搜一大把，学生要它没用。
+        # 有用的是：把这个项目的地点、主题、时间、参与方式落进每一节，
+        # 让他知道"在新宁一中做支教"这件事该问什么、该记什么、什么不能写。
+        area = _location_area(project) or "实践地"
+        span = (f"{project.get('practice_start')} 至 {project.get('practice_end')}"
+                if project.get("practice_start") and project.get("practice_end")
+                else "实践期间（原文未写明具体日期，按实际安排填写）")
+        # 用户在工作台填过实践收获时带进来；没填就整块不出现——原来不管有没有
+        # 都挂一句「本次实践收获输入：[请在实践后补充：…]」，像一张没填完的表。
+        gains_block = (
+            f"\n你已经记下的：\n\n> {_compact_text(context.get('practice_gains'))}\n"
+            if _compact_text(context.get("practice_gains")) else ""
+        )
         content = f"""# {title} 调研报告框架
 
+> 这是按你这次实践的**地点、主题和时间**定制的框架，不是通用模板。
+> 每一节的提示都指向{area}的{theme}，照着往里填就行。
+> 空着的地方是只有去过现场的人才知道的，我不替你写。
+
 ## 摘要
-用 300–500 字说明研究问题、方法、核心发现和建议。仅在证据充分后填写结论。
+300–500 字：你在{area}围绕{theme}想弄清什么问题、用了什么方法、
+发现了什么、建议是什么。**这一节最后写**——证据不够时宁可留白。
 
 ## 1. 问题提出与研究背景
-- 项目所处的政策、地区或行业背景；
-- 研究问题及其现实价值；
-- 关键概念和研究边界。
+- {area}在{theme}上的现状：政策、资源、既有做法；
+- 你这次要回答的具体问题（一句话，能被证伪的那种）；
+- 边界：哪些不在你的调研范围内，说清楚。
 
 ## 2. 研究设计
-- 样本与受访者选择；
-- 访谈、观察、问卷或二手资料方法；
-- 时间、地点与实施过程；
-- 研究伦理、局限性和数据处理方式。
+- 时间：{span}；地点：{area}
+- 你实际接触到的人是谁（{work_principle}）；样本怎么来的、有没有偏差；
+- 方法：{default_task}中哪些产生了可用的记录；
+- 伦理：录音和引用是否取得同意、敏感信息怎么处理。
 
 ## 3. 主要发现
-按“发现—证据—解释—反例/边界”组织每一节，不把单个受访者观点外推为总体事实。
+每一节按「发现 — 证据 — 解释 — 反例或边界」写。
+证据要能指回具体的访谈记录、观察笔记或文件，**不要把一个人的说法写成普遍情况**。
 
 ## 4. 机制分析
-分析参与主体、资源约束、协作流程与制度环境之间的关系。
+在{area}这个具体场景里：谁在推动、谁在承担成本、卡在哪个环节、
+制度和资源怎么约束了各方的选择。
 
 ## 5. 对策建议
-分别给出短期可执行建议和中长期制度建议，注明实施主体、成本、前提和评估指标。
+短期（这次实践结束就能做的）和中长期分开写。每条注明：谁来做、要花什么、
+前提是什么、怎么判断有没有用。**做不到的别写**。
 
 ## 6. 结论与反思
-回答研究问题，说明尚未解决的问题及后续研究方向。
+回答第 1 节提出的问题。哪些没答上来、为什么、下一步该怎么查。
 
 ## 7. 实践收获与个人反思
-基于实践收获输入，区分“我实际学到了什么”“哪些判断被现场修正”“下一步如何改进”，不把感想写成未经证实的事实。
-
-本次实践收获输入：
-{practice_gains}
-
+分三段写：我实际学到了什么；**哪些出发前的判断被现场推翻了**；下一步怎么改进。
+第二段是最有价值的一段，也是最容易写成套话的一段——写具体的那一次。
+{gains_block}
 ## 附录
-访谈提纲、知情同意说明、样本概况、编码表和来源清单。
+访谈提纲、知情同意说明、样本概况、来源清单。
 
-### 证据矩阵建议
-| 编号 | 结论 | 证据来源 | 是否交叉验证 | 可否公开 |
+### 证据台账
+边做边记，报告写起来就不用回忆。每条结论对应一行：
+
+| 编号 | 结论 | 证据来源（哪次访谈/哪份文件） | 有没有第二个来源印证 | 能否公开引用 |
 |---|---|---|---|---|
-| F01 | [待填写] | 访谈/观察/文件 | 是/否 | 是/匿名/否 |
+| F01 |  |  |  |  |
 """
     else:
         raise ValueError("kind must be application, outreach, interview, itinerary, or report")

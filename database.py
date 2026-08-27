@@ -217,6 +217,26 @@ class Database:
             self.upsert_project(project, note="初始化演示数据", log_activity=False)
         self.log("seed", f"已载入 {len(projects)} 条演示项目（日期整体平移 {delta.days} 天）")
 
+    def latest_article_text(self, source_url: str) -> str:
+        """这个链接最新一版的原文正文。
+
+        写推送时需要它。原来只把抽取出来的十来条字段喂给模型，然后要求写
+        400–700 字——信息量根本不够，模型只能编：实测生成的文案里出现了
+        「湘西南的群山之间」「你站在讲台上，面对的是一双双好奇的眼睛」
+        「也许你讲的是函数图像，是牛顿定律」，项目卡里一个字都没有。
+
+        而原文我们整篇存着，一直没拿来用。同一个链接可能有多版（订正推送），
+        取最后一版。
+        """
+        if not source_url:
+            return ""
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT raw_text FROM articles WHERE source_url=? ORDER BY id DESC LIMIT 1",
+                (source_url,),
+            ).fetchone()
+        return (row["raw_text"] or "").strip() if row else ""
+
     def insert_article(self, payload: dict[str, Any]) -> int:
         with self.connect() as db:
             cursor = db.execute(
