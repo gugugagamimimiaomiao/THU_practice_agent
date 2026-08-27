@@ -169,7 +169,10 @@ def main() -> int:
         "failures": failures, "articles": articles}, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps({"ok": True, "articles": len(articles), "missing_accounts": missing,
         "failures": len(failures), "output": str(output)}, ensure_ascii=False))
-    return 0 if articles else 1
+    # A no-op is a healthy completed scan: there may simply be no new
+    # recruitment posts. Treating it as a failure made the daily job report a
+    # broken update and discarded its otherwise useful audit batch.
+    return 0
 
 
 if __name__ == "__main__":

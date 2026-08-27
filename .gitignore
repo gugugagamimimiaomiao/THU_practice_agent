@@ -9,6 +9,8 @@ data/exports/
 data/collection_quality_report.json
 data/collection_quality_samples.jsonl
 data/wechat_backfill_state.json
+data/logs/
+data/wda_state.json
 .env
 
 # 临时脚本、探测日志、跑出来的中间产物一律放这里，不入库。

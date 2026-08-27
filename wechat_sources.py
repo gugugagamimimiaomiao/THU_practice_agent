@@ -88,6 +88,17 @@ DEPARTMENT_ACCOUNTS = (
 DEFAULT_ACCOUNTS = tuple(dict.fromkeys(SCHOOLWIDE_PRACTICE_ACCOUNTS + DEPARTMENT_ACCOUNTS))
 MAX_ACCOUNTS = 100
 
+# The public-feed worker polls only high-value sources selected for daily
+# opportunity discovery. This stays separate from the broader developer-panel
+# catalog, where adding an account should not silently increase daily load.
+DAILY_PRIORITY_ACCOUNTS = (
+    "清华大学学生会",
+    "清华大学学生社团",
+    "清华紫荆之声",
+    "清华大学学生公益",
+    "清华大学乡村振兴工作站",
+)
+
 # Used only to migrate installations that still have the original untouched
 # defaults. Any other saved list is treated as an explicit developer choice.
 LEGACY_DEFAULT_ACCOUNTS = ("清华大学社会实践", "无限之声", "清华大学学生公益")
