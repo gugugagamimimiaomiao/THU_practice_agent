@@ -294,12 +294,39 @@ def openai_error(message: str, *, error_type: str = "invalid_request_error", par
 # 意图关键词集中在这里，方便随时补同义词。
 # 教训：产品文档、网页 UI 和这里曾经各用各的词——README 写"报名陈述"，
 # 而这里只认"报名理由"，用户照着文档说话反而失败。新增说法时三处要对齐。
-GENERATE_WORDS = (
-    "访谈", "外联", "联系话术", "沟通话术", "行程", "日程",
-    "报告框架", "报告大纲", "调研报告",
-    "报名理由", "申请理由", "报名材料", "申请材料", "个人陈述",
-    "报名陈述", "自荐", "报名文书", "怎么写", "帮我写",
+# 材料类型 → 触发词。**这一张表同时决定"要不要生成"和"生成哪一种"。**
+#
+# 原来是两处各写各的：GENERATE_WORDS 里有「调研报告」，而 _generate 内部判断
+# 类型时只认「报告框架」「报告大纲」。于是说「帮我写这个项目的调研报告」，
+# 词表放行了、类型却掉回默认的 application——用户要调研报告，拿到一份报名表建议。
+# 今天已经在"两张手工清单各写各的"上栽过三次，这里合成一张。
+#
+# 顺序即优先级：报告类要排在 application 之前，否则「写一份调研报告」里的
+# 「写一份」会先被通用词抢走。
+_ASSET_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("outreach", ("外联", "联系话术", "沟通话术", "对接话术", "联系当地", "对外沟通")),
+    ("interview", ("访谈", "访谈提纲", "访谈问题", "问卷提纲", "该问什么")),
+    ("itinerary", ("行程", "日程", "路线安排", "时间安排表")),
+    ("report", (
+        "调研报告", "研究报告", "实践报告", "结题报告", "成果报告",
+        "报告框架", "报告大纲", "报告提纲", "报告结构", "报告怎么写",
+        "调研提纲", "调研框架", "调研大纲", "调研设计", "调研方案",
+    )),
+    ("application", (
+        "报名理由", "申请理由", "报名材料", "申请材料", "个人陈述",
+        "报名陈述", "自荐", "报名文书", "报名表",
+    )),
 )
+GENERATE_WORDS = tuple(dict.fromkeys(
+    [word for _, words in _ASSET_KEYWORDS for word in words] + ["怎么写", "帮我写"]
+))
+
+
+def _asset_kind(text: str) -> str:
+    for kind, words in _ASSET_KEYWORDS:
+        if any(word in text for word in words):
+            return kind
+    return "application"
 RECOMMEND_WORDS = (
     "推荐", "适合我", "找项目", "匹配", "有什么项目", "有哪些项目", "筛选",
     "有报销", "能报销", "可以报销", "有经费", "报销的",
@@ -1620,16 +1647,10 @@ class PracticeChatAdapter:
         return "\n".join(lines)
 
     def _generate(self, messages: list[dict[str, Any]], all_user_text: str, latest: str) -> ChatResult:
-        kind = "application"
-        if any(word in latest for word in ["外联", "联系话术", "沟通话术"]):
-            kind = "outreach"
-        elif "访谈" in latest:
-            kind = "interview"
-        elif any(word in latest for word in ["行程", "日程"]):
-            kind = "itinerary"
-        elif any(word in latest for word in ["报告框架", "报告大纲"]):
-            kind = "report"
+        kind = _asset_kind(latest)
         project = self._resolve_project(messages, latest, loose=True)
+        if kind == "report" and project:
+            return self._draft_report(project)
         if not project:
             candidates = self.match_projects(latest, loose=True)
             if len(candidates) > 1:
@@ -1666,6 +1687,70 @@ class PracticeChatAdapter:
         }.get(kind)
         hint = f"\n\n还可以为这个项目生成：{siblings}。" if siblings else ""
         return ChatResult(result["content"] + warnings + hint, f"generate_{kind}", project["id"])
+
+    _REPORT_SYSTEM_PROMPT = (
+        "你在帮清华大学的学生搭一份社会实践调研报告的框架。**他还没出发**，"
+        "所以你写的是「到了那里该弄清什么、该记下什么」，不是结论。\n\n"
+        "**你手上有两样材料**：【原文】是这个项目自己发布的招募通知全文，"
+        "【项目事实】是从里面抽出来、已经核对过的关键字段。\n\n"
+        "硬性要求：\n"
+        "1. **每一节的提示都必须落到这个项目上。** 原文里写了去哪、做什么、"
+        "跟谁合作、想解决什么问题——把这些变成具体的调研问题。"
+        "写不出项目特有的东西时，宁可这一节少写两条，也不要用「分析各方关系」\n"
+        "「梳理现状」这种放到任何项目上都成立的空话填满。\n"
+        "2. **不要替他写结论、发现、数据、访谈记录。** 他还没去。\n"
+        "3. **不许编原文里没有的事实**：合作单位、往届成果、当地数据、政策文件名。"
+        "需要他去核实的，就写成「待你到现场确认」。\n"
+        "4. 方法建议要跟这次实践的实际形态匹配——支教就是课堂观察和师生访谈，"
+        "产业调研就是企业走访和二手数据，别一律写「发放问卷」。\n"
+        "5. 伦理提醒要具体：涉及未成年人、涉及个人隐私、需要录音授权的，分别点出来。\n\n"
+        "输出结构（用 Markdown，标题层级照抄）：\n"
+        "开头一句话说明这份框架是按哪个项目、哪个地点、哪个议题定制的；\n"
+        "## 摘要 / ## 1. 问题提出与研究背景 / ## 2. 研究设计 / ## 3. 主要发现\n"
+        "## 4. 机制分析 / ## 5. 对策建议 / ## 6. 结论与反思 / ## 7. 实践收获与个人反思\n"
+        "## 附录，最后给一张证据台账空表。\n"
+        "总长 800-1200 字。"
+    )
+
+    def _draft_report(self, project: dict[str, Any]) -> ChatResult:
+        """调研报告框架——跟推送一样，拿原文当依据，模板只作兜底。
+
+        用户的原话是「调研还是很烂……没有上下文」。确实：我修推送时把原文喂了
+        进去，报告这条却还是纯模板套变量——七节提示放到任何项目上都成立，
+        学生要它没用。同一个项目、同一份原文，凭什么写推送能用、写报告不能用。
+        """
+        facts = self._project_facts_block(project)
+        source = self.db.latest_article_text(project.get("source_url", ""))[:4000]
+        fallback = generate_asset(project, "report")
+
+        if not llm.is_enabled() or not source:
+            reason = "当前没有配置写作模型" if not llm.is_enabled() else "这个项目没有存档原文"
+            return ChatResult(
+                f"> {reason}，下面是按项目地点和主题套出来的通用框架。\n\n"
+                + fallback["content"],
+                "generate_report_fallback", project["id"],
+            )
+        try:
+            body = llm.complete(
+                self._REPORT_SYSTEM_PROMPT,
+                f"【项目事实】\n{facts}\n\n【原文】\n{source}\n\n请据此搭调研报告框架。",
+            )
+        except llm.LLMUnavailable:
+            return ChatResult(
+                "> 写作模型这次没能用上，下面是通用框架。\n\n" + fallback["content"],
+                "generate_report_fallback", project["id"],
+            )
+        if not body.strip():
+            return ChatResult(fallback["content"], "generate_report_fallback", project["id"])
+
+        invented = unsupported_numbers(body, f"{facts}\n{source}")
+        tail = ""
+        if invented:
+            tail = ("\n\n> **这几个数字在原文和项目卡里都查不到出处**："
+                    + "、".join(invented) + "。用之前先核实。")
+        tail += ("\n\n---\n> 这份框架依据的是该项目的招募通知原文。"
+                 "空着的地方是只有去过现场的人才知道的，我不替你写。")
+        return ChatResult(body.strip() + tail, "generate_report", project["id"])
 
     _POST_SYSTEM_PROMPT = (
         "你在帮清华大学的学生给一次社会实践招募写公众号推送文案。\n\n"

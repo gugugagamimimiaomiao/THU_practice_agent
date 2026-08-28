@@ -61,6 +61,40 @@ class ReportSpecificityTests(unittest.TestCase):
         self.assertIn("备课和上课完全是两件事", with_gains)
 
 
+class AssetKindRoutingTests(unittest.TestCase):
+    """说法稍微一变就认不出来，是用户反馈的原话：「必须要非常非常严格的关键词」。
+
+    原来 GENERATE_WORDS 和类型判断是两处各写各的：词表里有「调研报告」，
+    而判断类型时只认「报告框架」「报告大纲」。于是说「帮我写这个项目的调研报告」，
+    词表放行了、类型却掉回默认的 application——用户要调研报告，拿到一份报名表建议。
+    """
+
+    def test_report_phrasings(self):
+        from chat_adapter import _asset_kind
+        for text in ["帮我写宝庆微光的调研报告", "调研报告框架", "写一份实践报告",
+                     "结题报告怎么写", "调研提纲", "调研方案", "报告结构给我看看",
+                     "研究报告大纲"]:
+            with self.subTest(text=text):
+                self.assertEqual(_asset_kind(text), "report")
+
+    def test_other_kinds_still_route(self):
+        from chat_adapter import _asset_kind
+        for text, kind in [("帮我写访谈提纲", "interview"), ("外联话术", "outreach"),
+                           ("行程安排", "itinerary"), ("帮我写报名理由", "application")]:
+            with self.subTest(text=text):
+                self.assertEqual(_asset_kind(text), kind)
+
+    def test_every_keyword_is_reachable_from_the_router(self):
+        """类型表里的词必须都在 GENERATE_WORDS 里，否则根本进不了 _generate。
+
+        这条就是为了防止两张表再次分叉。
+        """
+        from chat_adapter import GENERATE_WORDS, _ASSET_KEYWORDS
+        for kind, words in _ASSET_KEYWORDS:
+            for word in words:
+                self.assertIn(word, GENERATE_WORDS, f"{kind} 的「{word}」进不了路由")
+
+
 class FieldLabelLeakTests(unittest.TestCase):
     def test_warnings_never_show_internal_field_names(self):
         for kind in ("application", "outreach", "interview", "report"):
