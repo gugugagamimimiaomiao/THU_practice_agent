@@ -167,9 +167,12 @@ class ChatIntentTests(unittest.TestCase):
         # 原来截 content[-220:]，而回复长度会随当天日期变化（演示数据的日期
         # 跟着当天平移，进推荐的条数就跟着变），窗口会滑进项目列表，测试
         # 于是在某些日期无缘无故地失败——测的也不是它想测的东西。
-        hints = [block for block in result.content.split("\n\n") if "接下来可以说" in block]
-        self.assertTrue(hints, f"回复里找不到引导语：{result.content[-300:]}")
-        hint = hints[-1]
+        # 取「接下来可以说」到结尾的整段。原来按 \n\n 切块取一块，
+        # 引导语一旦改成"标题 + 逐条列出"的排版就取不全了——测试于是因为
+        # 排版变化而失败，而它想测的是措辞。
+        marker = "接下来可以说"
+        self.assertIn(marker, result.content, f"回复里找不到引导语：{result.content[-300:]}")
+        hint = result.content[result.content.index(marker):]
 
         titles = [p["title"] for p in self.adapter.db.list_projects()]
         self.assertFalse(

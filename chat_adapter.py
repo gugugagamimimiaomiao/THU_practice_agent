@@ -370,6 +370,20 @@ def _distinctive_overlap(title: str, text: str) -> str:
     return best if residue.strip() else ""
 
 
+# published / expired / needs_review 是内部枚举，学生看不懂。
+_STATUS_LABELS = {
+    "published": "已核验，可报名",
+    "expired": "已过期",
+    "needs_review": "线索待核验，不能作为报名依据",
+    "rejected": "已驳回",
+}
+
+
+def _cell(value: Any) -> str:
+    """放进 Markdown 表格的单元格：竖线要转义，换行要压平。"""
+    return str(value or "").replace("|", "｜").replace("\n", " ").strip()
+
+
 def _asset_kind(text: str) -> str:
     for kind, words in _ASSET_KEYWORDS:
         if any(word in text for word in words):
@@ -539,7 +553,15 @@ _STRICT_HINTS = (
     "没有就直接说", "没有就说没有", "没有合适就直接说", "没有合适就说",
     "不要凑数", "别凑数", "不用凑", "不要补位", "宁可没有", "凑数",
 )
-_CLAUSE_SPLIT_RE = re.compile(r"[，,。；;！!？?、\n]+")
+# 除了标点，转折连词也要断句。
+#
+# 实测：「我想去云南但是不要支教」整句没有标点，被当成一个否定小句，
+# 于是「云南」——用户明确想去的地方——被划进了排除表，回复是
+# 「我理解你想避开：云南、教育、支教」，跟他说的正好相反。
+# 「推荐三个」「给我两个」「来五条」——说了数量就按数量给，别一律五条。
+_ASK_COUNT_RE = re.compile(r"(?:推荐|给我|来|要|找|列)\s*([一二两三四五六七八九十]|\d)\s*(?:个|条|项|份)")
+
+_CLAUSE_SPLIT_RE = re.compile(r"[，,。；;！!？?、\n]+|但是|不过|然而|另外|只是|可是")
 
 
 def _split_clauses(text: str) -> list[str]:
@@ -1064,7 +1086,8 @@ class PracticeChatAdapter:
         for text in user_messages:
             turn = self._extract_profile(text)
             for field in ("department", "grade", "themes", "preferred_locations",
-                          "location_labels", "available_start", "available_end"):
+                          "location_labels", "available_start", "available_end",
+                          "wanted_count"):
                 if turn[field]:
                     merged[field] = turn[field]
             if turn["reimbursement_preference"] != "not_important":
@@ -1095,6 +1118,7 @@ class PracticeChatAdapter:
             "excluded_locations": [],
             "excluded_themes": [],
             "excluded_terms": [],
+            "wanted_count": 0,
             "location_strict": False,
             "strict": False,
             "reimbursement_preference": "not_important",
@@ -1131,8 +1155,22 @@ class PracticeChatAdapter:
         profile["location_labels"], profile["preferred_locations"] = expand_location_query(text)
         if any(word in text for word in ["必须报销", "必须有报销", "必须有补贴", "只要有报销", "经费必须"]):
             profile["reimbursement_preference"] = "required"
-        elif any(word in text for word in ["优先报销", "优先有补贴", "最好有报销", "偏好报销"]):
+        elif any(word in text for word in [
+            "优先报销", "优先有补贴", "最好有报销", "偏好报销",
+            # 学生的实际说法，一个「报销」两个字都不带：
+            # 「有没有管吃管住报销路费的」「补贴超过2000的」「包吃住的」。
+            # 原来这几种一个都认不出来，条件说了等于没说。
+            "管吃管住", "包吃住", "包食宿", "报销路费", "报销车费", "报销交通",
+            "有补贴", "有报销", "能报销", "可以报销", "有经费", "给钱",
+        ]) or re.search(r"(?:补贴|报销|经费|补助)[^。，,；;]{0,6}\d", text):
             profile["reimbursement_preference"] = "preferred"
+        # 「推荐三个」「给我两个」——说了数量就该按数量给。
+        want = _ASK_COUNT_RE.search(text)
+        if want:
+            token = want.group(1)
+            count = _CN_NUMERALS.get(token) or (int(token) if token.isdigit() else 0)
+            if 1 <= count <= 9:
+                profile["wanted_count"] = count
         iso_dates = re.findall(r"20\d{2}-\d{1,2}-\d{1,2}", text)
         if len(iso_dates) >= 2:
             profile["available_start"], profile["available_end"] = iso_dates[:2]
@@ -1323,6 +1361,97 @@ class PracticeChatAdapter:
         lines.append("\n想看某一条为什么排在那里，说出它标题里的几个字，我给你逐字段的原文引用。")
         return ChatResult("\n".join(lines), "explain_recommendation")
 
+    def _constraint_receipt(self, profile: dict[str, Any], result: dict[str, Any]) -> str:
+        """把用户说的每一条件，逐条交代它到底起没起作用。
+
+        这是「静默失效」这一类问题的通用解法。地域和时间已经各有一段说明，
+        但 100 轮实测发现口子远不止这两个——下面 11 句完全不同的话，
+        返回的是**逐字节相同**的推荐列表，回复里一个字都没提用户的条件：
+
+            校内的有吗 / 有没有管吃管住报销路费的 / 补贴超过2000的有没有 /
+            大一新生能报什么 / 我是研究生，有啥适合我的 / 机械系的有吗 /
+            有没有出国的 / 推荐三个 / 现在还有什么能报的 /
+            国庆期间有实践吗 / 我大一，只想找不用出京的
+
+        用户以为筛过了，其实没有。所以不再为每个条件单写一段，而是统一走这里：
+        凡是读到的条件，都必须出现在回执里；凡是没能落到实处的，明说没落到。
+        """
+        shown = result.get("eligible", [])[:self._show_count(profile)]
+        rows: list[str] = []
+
+        location = self._location_note(profile, result)
+        if location:
+            rows.append(location)
+        time_note = self._time_note(profile, result)
+        if time_note:
+            rows.append(time_note)
+
+        # 年级和院系：只有当项目原文写明了限制，这两条才真的起作用。
+        # 真实数据里绝大多数通知只写「面向全校」，所以老实说"没起作用"。
+        for label, value, field in (("年级", profile.get("grade"), "grades"),
+                                    ("院系", profile.get("department"), "departments")):
+            if not value:
+                continue
+            restricted = sum(
+                1 for project in self._projects(include_expired=True)
+                if (project.get("eligibility") or {}).get(field)
+            )
+            if restricted:
+                rows.append(f"{label}「{value}」：库里有 {restricted} 个项目写了{label}限制，"
+                            f"不符合的已排除；其余没写，按不限处理。")
+            else:
+                rows.append(f"{label}「{value}」：库里的通知**都没写{label}限制**，"
+                            f"所以这一条没能筛掉任何东西，报名前请自行确认。")
+
+        if profile.get("reimbursement_preference") != "not_important" and shown:
+            with_money = sum(
+                1 for item in shown
+                if (item["project"].get("reimbursement") or {}).get("has_reimbursement") is True)
+            unknown = len(shown) - with_money
+            rows.append(f"经费：上面 {with_money} 条原文明确写了提供，"
+                        f"另外 {unknown} 条没写明——没写不等于没有，要看原文或问主办方。")
+
+        if not rows:
+            return ""
+        if len(rows) == 1:
+            return f"> {rows[0]}"
+        return "\n".join(["> **你说的条件，逐条交代：**", ">"]
+                         + [f"> - {row}" for row in rows])
+
+    def _next_steps(self, profile: dict[str, Any], result: dict[str, Any]) -> str:
+        """告诉用户接下来还能干什么——按这次的实际情况挑，不是一句固定话术。
+
+        原来只提两件事：「比较前两个」和「帮我写第一个的报名理由」。而系统能做的
+        远不止：访谈提纲、外联话术、调研报告、推送文案、放宽条件、追问排序依据、
+        查数据来源、看还没核验的线索。用户看不见就等于没有——100 轮实测里
+        很多能力从头到尾没被触发过，不是它不会，是没人知道可以这么问。
+
+        挑选是有条件的：只有真的有两条以上才提「比较」，只有真的存在待核验线索
+        才提「看线索」，说了地域又没匹配上才提「放宽」。提一件做不到的事
+        比不提更糟。
+        """
+        steps: list[str] = []
+        if len(result.get("eligible", [])) >= 2:
+            steps.append("「比较前两个」")
+        steps.append("「帮我写第一个的报名理由」")
+        steps.append("「写访谈提纲」「写外联话术」「写调研报告框架」「写推送文案」")
+        if result.get("location_asked") and not result.get("location_matched"):
+            steps.append("「不限地点再看看」")
+        if result.get("potential"):
+            steps.append(f"「看看那 {len(result['potential'])} 条线索」")
+        steps.append("「你为什么这么推荐」")
+        return (
+            "\n---\n**接下来可以说**\n\n"
+            + "\n".join(f"- {step}" for step in steps)
+            + "\n\n想看某一条的详情和原文引用，说出标题里能区分的那几个字就行——地名或主题都可以。"
+        )
+
+    @staticmethod
+    def _show_count(profile: dict[str, Any]) -> int:
+        """列几条。说了「推荐三个」就给三条，没说按默认五条。"""
+        wanted = profile.get("wanted_count") or 0
+        return wanted if 1 <= wanted <= 9 else 5
+
     @staticmethod
     def _time_note(profile: dict[str, Any], result: dict[str, Any]) -> str:
         """说了时间就得交代它在多少条上真的起了作用。
@@ -1336,7 +1465,7 @@ class PracticeChatAdapter:
         start, end = profile.get("available_start"), profile.get("available_end")
         if not (start and end):
             return ""
-        shown = result.get("eligible", [])[:5]
+        shown = result.get("eligible", [])[:PracticeChatAdapter._show_count(profile)]
         if not shown:
             return ""
         unknown = sum(1 for item in shown
@@ -1372,7 +1501,7 @@ class PracticeChatAdapter:
         # 排他模式下一条都不补，说了就自相矛盾——实测出现过：
         # 「库里目前一个都没有。下面几条不在这个范围内」紧跟着
         # 「没有完全匹配的」，前后两句打架。
-        filler = max(0, len(result.get("eligible", [])) - in_list)
+        filler = max(0, min(len(result.get("eligible", [])), self._show_count(profile)) - in_list)
 
         if in_list:
             note = f"你提到了{said}：库里符合的有 {in_list} 个，已经排在最前面。"
@@ -1419,9 +1548,9 @@ class PracticeChatAdapter:
         profile = self._profile_from_turns(user_messages)
         result = recommend_projects(self._projects(include_expired=True), profile)
         lines = ["## 正式推荐"]
-        for note in (self._location_note(profile, result), self._time_note(profile, result)):
-            if note:
-                lines.append(f"\n> {note}\n")
+        receipt = self._constraint_receipt(profile, result)
+        if receipt:
+            lines.append("\n" + receipt + "\n")
         if not result["eligible"]:
             # 空结果最容易发生在换了真实数据、或全部项目都过了截止的时候。
             # 与其只说一句"没有"，不如说清楚是被什么条件挡住的、下一步怎么放宽。
@@ -1453,9 +1582,11 @@ class PracticeChatAdapter:
         # 少给两个选项对学生是实实在在的损失。
         # 分层能两头兼顾：前三条照旧可以直接判断能不能报，后两条留个名字和一句
         # 关键信息，想看详情说标题里那几个字就行。
-        for index, item in enumerate(result["eligible"][:3], 1):
+        total = self._show_count(profile)
+        full = min(3, total)
+        for index, item in enumerate(result["eligible"][:full], 1):
             lines.extend(self._recommendation_card(index, item))
-        for index, item in enumerate(result["eligible"][3:5], 4):
+        for index, item in enumerate(result["eligible"][full:total], full + 1):
             lines.append(self._recommendation_line(index, item))
         if result["potential"]:
             # 标题原来叫「潜在机会（需先复核）」，条目排版和正式推荐几乎一样，
@@ -1499,13 +1630,7 @@ class PracticeChatAdapter:
             # 别把完整标题塞进引导语——真实通知的标题有三四十字
             # （「关于组建2026年赴湖南省湘西州花垣县开展……支队的通知」），
             # 照着这句说没人打得出来。用序号指代，再告诉用户可以只说关键几个字。
-            hint = "「帮我写第一个的报名理由」"
-            if len(result["eligible"]) >= 2:
-                hint = f"「比较前两个推荐项目」，或者{hint}"
-            lines.append(
-                f"\n接下来可以说：{hint}。"
-                "想看某一个的详情和原文引用，说出标题里能区分的那几个字就行——地名或主题都可以。"
-            )
+            lines.append(self._next_steps(profile, result))
         return ChatResult("\n".join(lines), "recommend")
 
     @staticmethod
@@ -1634,8 +1759,19 @@ class PracticeChatAdapter:
         if direct:
             return direct[0]
 
-        # 「第一个」「第二项」只认用户刚看到的那份列表，认不出就返回 None
-        # 让调用方去问——绝不往下掉进模糊匹配。
+        # 序数词必须在最前面处理，而且不受 latest_only 影响。
+        #
+        # 原来这段包在 `if not latest_only:` 里。reply() 后半段有一次
+        # `_resolve_project(..., latest_only=True)`，走到那里时序数逻辑被跳过，
+        # 「第二个详细说说」于是掉进模糊匹配——「第二」命中了标题里的
+        # 「（第二批）」，「第一」命中「（第一批次）」。实测三次串线全出在这里，
+        # 而且返回的是已截止三个月的项目卡，还煞有介事地列出经费原文。
+        ordinal_asked = self._ordinal_in(latest)
+        if ordinal_asked is not None:
+            shown = self._shown_list(messages)
+            return shown[ordinal_asked - 1] if 1 <= ordinal_asked <= len(shown) else None
+
+        # 指代同样要排在模糊匹配前面。
         #
         # 100 轮实测里最严重的一次串线就出在这里：第 96 轮推荐了春山和宝庆，
         # 第 97 轮说「给第一项生成报名风险清单」，系统绑到了宣传部学生骨干，
@@ -1645,11 +1781,6 @@ class PracticeChatAdapter:
         # 排最前的那个"，跟屏幕上的顺序毫无关系。
         # 给错项目写材料比答不上来严重得多，所以这里宁可返回 None。
         if not latest_only:
-            ordinal = self._ordinal_in(latest)
-            if ordinal is not None:
-                shown = self._shown_list(messages)
-                return shown[ordinal - 1] if 1 <= ordinal <= len(shown) else None
-
             # 「这个项目」「它」这类指代同样要排在模糊匹配前面。
             # 实测过一次：「帮我写这个项目的报名理由」里的"项目"两个字，
             # 被模糊匹配命中了标题里含「项目」的另一条记录——指代词本身
@@ -2523,16 +2654,28 @@ class PracticeChatAdapter:
         if len(mentioned) < 2:
             return ChatResult("目前没有两个已核验项目可供比较。请提供两个项目名称。", "compare_needs_projects")
         a, b = mentioned[:2]
+        # 用户点名了项目、却没找到时必须说清楚换成了谁。
+        # 实测「比较一下宝庆微光和助梦1+1」把助梦1+1 悄悄换成了研究生支教团，
+        # 全程一句说明都没有——用户会以为自己在看助梦1+1 的数据。
+        named = [project["title"] for project in projects
+                 if project["title"] in text or project["id"] in text]
+        substituted = [p["title"] for p in (a, b) if p["title"] not in named] if named else []
         rows = [
-            ("审核状态", a.get("status"), b.get("status")),
+            ("状态", _STATUS_LABELS.get(a.get("status"), a.get("status")),
+             _STATUS_LABELS.get(b.get("status"), b.get("status"))),
             ("报名截止", a.get("signup_deadline") or "待确认", b.get("signup_deadline") or "待确认"),
             ("实践时间", f"{a.get('practice_start') or '?'} 至 {a.get('practice_end') or '?'}", f"{b.get('practice_start') or '?'} 至 {b.get('practice_end') or '?'}"),
             ("地点", a.get("location", {}).get("detail") or "待确认", b.get("location", {}).get("detail") or "待确认"),
             ("资格", a.get("eligibility", {}).get("restriction_text") or "待确认", b.get("eligibility", {}).get("restriction_text") or "待确认"),
             ("经费", a.get("reimbursement", {}).get("text") or "待确认", b.get("reimbursement", {}).get("text") or "待确认"),
         ]
-        table = [f"| 维度 | {a['title']} | {b['title']} |", "|---|---|---|"]
-        table.extend(f"| {label} | {left} | {right} |" for label, left, right in rows)
+        # 项目标题里带 `|`（「实践招募 | 机械系…」）会把 Markdown 表格撑坏：
+        # 表头多出一列，分隔行对不上，在清小搭里渲染成错位表格。库里这类标题很多。
+        table = [f"| 维度 | {_cell(a['title'])} | {_cell(b['title'])} |", "|---|---|---|"]
+        table.extend(f"| {label} | {_cell(left)} | {_cell(right)} |" for label, left, right in rows)
+        if substituted:
+            table.insert(0, f"> 你点名的项目里有找不到的，我用「{'、'.join(substituted)}」补上了。"
+                            "要比别的就把项目名说全一点。\n")
         table.append("\n以上信息来自项目卡；正式报名仍应打开原文核对最新通知。")
         table.append(f"\n接下来可以说：「帮我写{a['title']}的报名理由」，或者直接说出其中一个项目名看它的原文依据。")
         return ChatResult("\n".join(table), "compare")
@@ -2587,7 +2730,7 @@ class PracticeChatAdapter:
             "",
             project.get("summary") or "暂无摘要",
             "",
-            f"- 状态：{project.get('status')}",
+            f"- 状态：{_STATUS_LABELS.get(project.get('status'), project.get('status'))}",
         ]
         lines.extend(f"- {label}：{value}" for label, value in rows if value)
         blank = [label for label, value in rows if not value]
