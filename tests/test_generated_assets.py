@@ -95,6 +95,42 @@ class AssetKindRoutingTests(unittest.TestCase):
                 self.assertIn(word, GENERATE_WORDS, f"{kind} 的「{word}」进不了路由")
 
 
+class DistinctiveOverlapTests(unittest.TestCase):
+    """判断"这句话点名了某个项目吗"，不能只看有没有字重合。
+
+    原来的护栏要求打出完整标题（「实践招募 | 机械系"宝庆微光"赴湖南新宁支教
+    实践支队招募」），没人这么打，于是「宝庆微光 调研提纲」被判成没点名项目，
+    掉进不绑项目的通用建议。
+
+    但一放宽就走到另一头：「帮我写一个乡村教育的调研提纲」命中了
+    「滇西乡村教育数字化调研」，被当成给那个项目写材料。
+
+    判据是重合片段要够长**且不是领域通用词拼出来的**。
+    """
+
+    def test_proper_noun_counts_as_naming(self):
+        from chat_adapter import _distinctive_overlap
+        self.assertEqual(
+            _distinctive_overlap("实践招募 | 机械系“宝庆微光”赴湖南新宁支教实践支队招募",
+                                 "宝庆微光 调研提纲"),
+            "宝庆微光")
+
+    def test_generic_topic_words_do_not_count(self):
+        from chat_adapter import _distinctive_overlap
+        for title, text in [
+            ("滇西乡村教育数字化调研", "帮我写一个乡村教育的调研提纲"),
+            ("青海生态保护与社区发展调研", "生态保护类的实践一般怎么写报告"),
+            ("城市社区儿童友好空间共创", "社区服务的调研方案"),
+        ]:
+            with self.subTest(text=text):
+                self.assertEqual(_distinctive_overlap(title, text), "",
+                                 "通用主题词被当成了点名项目")
+
+    def test_two_characters_is_too_short(self):
+        from chat_adapter import _distinctive_overlap
+        self.assertEqual(_distinctive_overlap("某某支队招募", "这个支队怎么样"), "")
+
+
 class FieldLabelLeakTests(unittest.TestCase):
     def test_warnings_never_show_internal_field_names(self):
         for kind in ("application", "outreach", "interview", "report"):

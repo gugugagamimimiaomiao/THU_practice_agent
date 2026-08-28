@@ -322,6 +322,54 @@ GENERATE_WORDS = tuple(dict.fromkeys(
 ))
 
 
+# 这些词几乎每个标题里都有，光靠它们重合不算"点名了某个项目"。
+#
+# 反例来自实测：「帮我写一个乡村教育的调研提纲」命中了「滇西乡村教育数字化调研」，
+# 于是被当成给那个项目写材料。而用户只是想要一份通用提纲。
+# 「宝庆微光」这种专名才算点名。
+_GENERIC_TITLE_WORDS = frozenset({
+    "实践", "调研", "志愿", "支教", "招募", "项目", "活动", "服务", "教育",
+    "乡村", "农村", "文化", "非遗", "生态", "环保", "科技", "数字", "健康",
+    "医疗", "公益", "治理", "社区", "振兴", "支队", "计划", "行动", "中心",
+    "报告", "提纲", "框架", "方案", "同学", "学生", "大学", "清华", "夏令营",
+})
+
+
+# 标题里被引号括起来的那一段，通常就是支队专名：
+#     实践招募 | 机械系“宝庆微光”赴湖南新宁支教实践支队招募
+_QUOTED_NAME_RE = re.compile(r"[“”\"'‘’「」『』]([^“”\"'‘’「」『』]{2,12})[“”\"'‘’「」『』]")
+
+
+def _distinctive_overlap(title: str, text: str) -> str:
+    """title 和 text 最长的公共片段；只是领域通用词拼出来的话返回空。
+
+    第一版用停用词表判断"是不是通用词"，补到第三条就露馅了：「生态保护」里
+    「生态」在表上、「保护」不在，于是被当成点名项目。这类表永远补不完——
+    今天已经在手工清单上栽过四次。
+
+    换成结构判据：标题里被引号括起来的那段通常就是支队专名（「宝庆微光」）。
+    命中专名就算点名；标题没有专名时（「滇西乡村教育数字化调研」），
+    短片段一律当通用主题词，要五个字以上才算。
+    """
+    best = ""
+    for start in range(len(text)):
+        for end in range(start + len(best) + 1, len(text) + 1):
+            fragment = text[start:end]
+            if fragment in title and len(fragment) > len(best):
+                best = fragment
+    if len(best) < 3:
+        return ""
+    quoted = " ".join(_QUOTED_NAME_RE.findall(title))
+    if quoted and (best in quoted or any(part in best for part in quoted.split() if len(part) >= 3)):
+        return best
+    if len(best) < 5:
+        return ""
+    residue = best
+    for word in _GENERIC_TITLE_WORDS:
+        residue = residue.replace(word, "")
+    return best if residue.strip() else ""
+
+
 def _asset_kind(text: str) -> str:
     for kind, words in _ASSET_KEYWORDS:
         if any(word in text for word in words):
@@ -802,7 +850,7 @@ class PracticeChatAdapter:
         # 「招募推送一般怎么写」问的是写法，不是要给某个项目出成稿。这类必须在
         # POST_WORDS / GENERATE_WORDS 之前拦下——否则"推送""帮我写"会先把它抢走。
         if (any(word in latest for word in WRITING_HELP_WORDS + GENERIC_WRITING_HINTS)
-                or _NAMING_RE.search(latest)) and not self._mentions_project_exactly(latest):
+                or _NAMING_RE.search(latest)) and not self._names_a_project(latest):
             return self._writing_help(latest)
         # 否定的判定统一走 _extract_profile 的否定小句逻辑，不再单独维护一张
         # NEGATION_WORDS 词表——两张表一定会漂。实测漏掉的就是「不考虑」：
@@ -1892,6 +1940,25 @@ class PracticeChatAdapter:
             project["title"] in text or project["id"] in text
             for project in self._projects(include_expired=True)
         )
+
+    def _names_a_project(self, text: str) -> bool:
+        """这一句能不能唯一定位到一个项目——完整标题、ID，或者足以区分的几个字。
+
+        原来这几处护栏用的是 _mentions_project_exactly，要求打出完整标题：
+
+            实践招募 | 机械系“宝庆微光”赴湖南新宁支教实践支队招募
+
+        没人会这么打。实测「宝庆微光 调研提纲」因此被判成"没点名项目"，
+        掉进通用写作建议——用户明明指定了项目，拿到的却是不绑项目的泛泛之谈。
+        这就是"必须要非常非常严格的关键词"的另一面。
+
+        改用模糊解析，但沿用它自带的歧义护栏：匹配不唯一时返回 None，
+        「实践总结怎么写」这类不会被误绑到某个项目上。
+        """
+        if self._mentions_project_exactly(text):
+            return True
+        project = self._resolve_project([], text, latest_only=True, loose=True)
+        return bool(project and _distinctive_overlap(project["title"], text))
 
     def _provenance(self) -> str:
         """回答"这些信息准吗 / 你怎么知道的 / 数据什么时候更新的"。
