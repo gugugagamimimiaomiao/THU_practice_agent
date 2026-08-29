@@ -1295,6 +1295,30 @@ class PracticeChatAdapter:
         )
         return command and (len(text) >= 40 or notice_signal >= 1)
 
+    # 对话导入的项目必须和采集来的项目分处两个 id 命名空间，而且永远只能落到
+    # 待核验区。这不是洁癖，是补一个能把整条真项目改掉的洞：
+    #
+    #   extract_project 的 id 是 stable_id(source_url or title, ...) 算出来的，
+    #   而对话导入里的 source_url 是从用户消息里正则抠出来的。用户只要把某个
+    #   真实项目的原文链接抄进来，算出的 id 就跟那个项目一模一样，upsert 的
+    #   ON CONFLICT(id) DO UPDATE 会把它**整条覆盖**——标题、状态、报名截止、
+    #   地点全换成他写的。而原文链接就印在我们每一张推荐卡上，人人可见。
+    #
+    #   更糟的是状态：status = "needs_review" if "source_url" in uncertain_fields
+    #   else "published"。用户自己给了链接，于是"有出处"成立，直接 published，
+    #   当场进正式推荐。
+    #
+    # 本地库副本上实测过：
+    #   AI助老与社区数字素养服务实践 / expired / 北京市海淀区
+    #   -> 原招募已取消，请勿报名 / published / 海南三亚
+    #   库里 8 条还是 8 条，原地覆盖、不新增、无提示，随后出现在正式推荐里。
+    #
+    # 这条路不该有鉴权豁免：对话是只读的，唯一的例外就是这里，所以这里必须
+    # 自己把自己关进隔离区。
+    CHAT_IMPORT_PREFIX = "chatimp_"
+    CHAT_IMPORT_ACCOUNT = "清小搭对话导入"
+    MAX_IMPORT_CHARS = 8000
+
     def _import_notice(self, text: str) -> ChatResult:
         url_match = re.search(r"https?://[^\s，。]+", text)
         source_url = url_match.group(0).rstrip(")]）") if url_match else ""
@@ -1313,36 +1337,55 @@ class PracticeChatAdapter:
         # 只在确实没有换行时才做，避免影响正常粘贴的多行正文。
         if "\n" not in raw_text and len(raw_text) > 40:
             raw_text = re.sub(r"(?<=[。！？；])(?=[^\s])", "\n", raw_text)
+        raw_text = raw_text[:self.MAX_IMPORT_CHARS]
         article_id = self.db.insert_article({
             "input_type": "copied_text",
-            "source_account": "清小搭对话导入",
+            "source_account": self.CHAT_IMPORT_ACCOUNT,
             "source_url": source_url,
             "raw_text": raw_text,
             "collector_status": "success",
         })
         project = extract_project(raw_text, {
             "input_type": "copied_text",
-            "source_account": "清小搭对话导入",
+            "source_account": self.CHAT_IMPORT_ACCOUNT,
             "source_url": source_url,
         })
         project["article_id"] = article_id
-        duplicate = self.db.find_duplicate(project)
+        # 隔离区，三条一起才管用，少一条都能被绕过：
+        #
+        # 1. id 加前缀。光去掉下面那段 find_duplicate 是不够的——id 本身就是
+        #    从 source_url 算出来的，撞车发生在 upsert 的 ON CONFLICT 上。
+        #    采集进来的 id 一律是 pxd_ 开头，加了前缀就永远撞不上。
+        # 2. 状态钉死在 needs_review。用户自己贴的链接不构成"有出处"，
+        #    只有真去抓过原文才算。needs_review 只出现在「线索」区，
+        #    标着"尚未核实，不能作为报名依据"，不进正式推荐。
+        # 3. 打标记。出了事要能一条命令全部找出来清掉。
+        project["id"] = self.CHAT_IMPORT_PREFIX + project["id"]
+        project["status"] = "needs_review"
+        project["chat_import"] = True
+        for field in ("uncertain_fields", "risk_notes"):
+            project.setdefault(field, [])
+        if "对话导入，未经核验" not in project["risk_notes"]:
+            project["risk_notes"].append("对话导入，未经核验")
+        # 只跟同样是对话导入的旧记录合并，绝不认领采集库里的项目。
+        duplicate = self.db.get_project(project["id"])
         if duplicate:
-            project["id"] = duplicate["id"]
             project["created_at"] = duplicate.get("created_at", project["created_at"])
-        project = self.db.upsert_project(project, note="通过清小搭对话导入")
+        project = self.db.upsert_project(project, note="通过清小搭对话导入（待核验）")
         # 刚写进库，缓存里的快照已经过期，同一次回复里后面还会用到。
         self._reset_project_cache()
         missing = self._field_labels(project.get("uncertain_fields", [])) or "无"
         content = (
-            f"已生成项目卡：**{project['title']}**\n\n"
-            f"- 状态：{project['status']}\n"
+            f"已解析成项目卡：**{project['title']}**\n\n"
             f"- 报名截止：{project.get('signup_deadline') or '待确认'}\n"
             f"- 实践时间：{project.get('practice_start') or '待确认'} 至 {project.get('practice_end') or '待确认'}\n"
             f"- 地点：{project.get('location', {}).get('detail') or '待确认'}\n"
             f"- 信息置信度：{round(float(project.get('confidence', 0)) * 100)}%\n"
             f"- 待确认字段：{missing}\n\n"
-            "关键字段仍应与公众号原文核对；只有 `published` 项目才会进入正式推荐。"
+            "> **这条进的是「线索」区，不会出现在正式推荐里。** 对话里贴进来的通知"
+            "我没法核实真假——原文是不是真的、链接对不对、有没有被改过，都要人工"
+            "核过才算数。核验之后它才会进正式推荐。\n\n"
+            "它也**不会覆盖库里任何已有项目**，哪怕你贴的链接跟某个项目一样。"
         )
         return ChatResult(content, "import", project["id"])
 
