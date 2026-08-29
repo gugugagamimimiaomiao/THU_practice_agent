@@ -1583,7 +1583,8 @@ class PracticeChatAdapter:
             steps.append("「不限地点再看看」")
         # 主题一条都没对上时，得给条出路。原来只有地域有这一条，
         # 于是「有没有非遗方向的」拿到五条不沾边的项目，连怎么退回去都不知道。
-        if self._theme_note(profile, result).endswith("想换个方向直接说。"):
+        wanted_themes, theme_hits, _ = self._theme_gap(profile, result)
+        if wanted_themes and not theme_hits:
             steps.append("「不限主题再看看」")
         if result.get("potential"):
             steps.append(f"「看看那 {len(result['potential'])} 条线索」")
@@ -1639,30 +1640,51 @@ class PracticeChatAdapter:
         顺带把我的归类摊开给用户看：他说「非遗」，我归到「文化传承」这一类。
         归错了他能当场纠正；不说的话，他连我按什么筛的都不知道。
         """
-        wanted = [theme for theme in (profile.get("themes") or []) if theme in THEME_KEYWORDS]
+        wanted, shown_hits, elsewhere = self._theme_gap(profile, result)
         if not wanted:
             return ""
-        chosen = set(wanted)
         shown = result.get("eligible", [])[:self._show_count(profile)]
-        hit_shown = sum(1 for item in shown
-                        if chosen & set(item["project"].get("theme_tags") or []))
-        hit_all = sum(1 for project in self._projects(include_expired=True)
-                      if not project.get("demo_data")
-                      and chosen & set(project.get("theme_tags") or []))
         said = "、".join(
             f"「{theme}」（{'、'.join(THEME_KEYWORDS[theme][:3])}都算这一类）"
             for theme in wanted)
-        if hit_shown:
-            note = f"主题{said}：上面 {hit_shown} 条对得上，已经排在前面。"
-            if len(shown) > hit_shown:
-                note += (f"其余 {len(shown) - hit_shown} 条**主题对不上**，"
+        if shown_hits:
+            note = f"主题{said}：上面 {shown_hits} 条对得上，已经排在前面。"
+            if len(shown) > shown_hits:
+                note += (f"其余 {len(shown) - shown_hits} 条**主题对不上**，"
                          "是按时间和信息完整度补的。")
             return note
-        if hit_all:
-            return (f"主题{said}：库里有 {hit_all} 个，但都没能进正式推荐"
-                    "（已截止，或关键字段还没核对完）。**下面几条主题都对不上。**")
+        if elsewhere:
+            # 光说"库里有 6 个"是个死胡同——用户下一句必然是"那 6 个是什么"，
+            # 而系统没有"列出主题匹配但已过期的"这个出口。索性就地列出来：
+            # 按标题查详情这条路本来就通，不用新造意图。
+            names = "、".join(f"**{project['title']}**" for project in elsewhere[:4])
+            more = f"，等 {len(elsewhere)} 个" if len(elsewhere) > 4 else ""
+            return (f"主题{said}：**下面几条主题都对不上。**库里主题对得上的是"
+                    f"{names}{more}，但都没能进正式推荐——已经截止，或者关键字段"
+                    "还没核对完。想看其中哪一条，说出标题里能区分的几个字。")
         return (f"主题{said}：**库里目前一条都没有。**下面几条主题对不上，"
                 "只是满足了其它条件——想换个方向直接说。")
+
+    def _theme_gap(self, profile: dict[str, Any],
+                   result: dict[str, Any]) -> tuple[list[str], int, list[dict[str, Any]]]:
+        """(用户要的主题, 展示列表里对上的条数, 库里对得上但没进推荐的项目)。
+
+        单独拎出来是因为 _theme_note 和 _next_steps 都要用。同一个判断散在
+        两处、各写一份，是这个项目上已经漂过五次的那种毛病。
+        """
+        wanted = [theme for theme in (profile.get("themes") or []) if theme in THEME_KEYWORDS]
+        if not wanted:
+            return [], 0, []
+        chosen = set(wanted)
+        shown = result.get("eligible", [])[:self._show_count(profile)]
+        shown_ids = {item["project"]["id"] for item in shown}
+        shown_hits = sum(1 for item in shown
+                         if chosen & set(item["project"].get("theme_tags") or []))
+        elsewhere = [project for project in self._projects(include_expired=True)
+                     if not project.get("demo_data")
+                     and project["id"] not in shown_ids
+                     and chosen & set(project.get("theme_tags") or [])]
+        return wanted, shown_hits, elsewhere
 
     def _location_note(self, profile: dict[str, Any], result: dict[str, Any]) -> str:
         """说清楚地域偏好到底满足没满足。没有偏好就返回空串。

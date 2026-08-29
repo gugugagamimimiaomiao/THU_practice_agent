@@ -11,6 +11,7 @@
 
 所以这里每条断言对应一次真实的失败，不是想象出来的场景。
 """
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -124,6 +125,83 @@ class RecommendationWordingTests(unittest.TestCase):
         只给个光秃秃的数字，看起来像随机跳动。
         """
         self.assertNotIn("匹配度", self.reply("推荐一些实践").content)
+
+
+class ThemeReceiptTests(unittest.TestCase):
+    """主题对不对得上，也得给个准话——地域早就有，主题一直没有。
+
+    实测：问「有没有非遗方向的实践」，五条没有一条沾边，而整段回复
+    一个字都不提主题。用户只会以为这五条就是非遗方向的。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tempdir = tempfile.TemporaryDirectory()
+        # 演示数据里本来就有一条已发布的「闽南非遗影像与社区记忆计划」，
+        # 不关掉的话这几条测试会走「对得上」分支，等于什么都没测。
+        # 灌演示数据发生在 Database() 构造时，比 upsert 早，所以只能用开关。
+        cls._seed_flag = os.environ.get("SEED_DEMO_DATA")
+        os.environ["SEED_DEMO_DATA"] = "false"
+        cls.database = Database(Path(cls.tempdir.name) / "chat.db")
+        base = {
+            "status": "published", "source_url": "", "signup_method": "原文报名",
+            "eligibility": {"restriction_text": "全校"}, "uncertain_fields": [],
+            "reimbursement": {"has_reimbursement": None, "text": ""},
+            "location": {"province": "北京", "detail": "北京"}, "field_evidence": {},
+        }
+        for index in range(3):
+            cls.database.upsert_project({**base, "id": f"open-{index}",
+                                         "title": f"校内迎新志愿服务岗招募（第{index + 1}期）",
+                                         "summary": "迎新志愿", "theme_tags": ["公益志愿"],
+                                         "practice_start": "2036-07-01",
+                                         "practice_end": "2036-07-10",
+                                         "signup_deadline": "2036-06-20"})
+        # 主题对得上，但已经截止——进不了正式推荐。
+        cls.database.upsert_project({**base, "id": "gone", "status": "expired",
+                                     "title": "“黔心守艺”赴贵州黔东南非遗调研支队",
+                                     "summary": "非遗调研", "theme_tags": ["文化传承"],
+                                     "practice_start": "2020-07-01",
+                                     "practice_end": "2020-07-10",
+                                     "signup_deadline": "2020-06-20"})
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls._seed_flag is None:
+            os.environ.pop("SEED_DEMO_DATA", None)
+        else:
+            os.environ["SEED_DEMO_DATA"] = cls._seed_flag
+        cls.tempdir.cleanup()
+
+    def setUp(self):
+        chat_adapter.llm.is_enabled = lambda: False
+        self.adapter = PracticeChatAdapter(self.database)
+
+    def reply(self, text):
+        return self.adapter.reply([{"role": "user", "content": text}])
+
+    def test_says_so_when_nothing_shown_matches_the_theme(self):
+        content = self.reply("有没有非遗方向的实践").content
+        self.assertIn("主题都对不上", content)
+
+    def test_names_the_matching_projects_instead_of_leaving_a_dead_end(self):
+        """光说"库里有 N 个"是死胡同——用户下一句必然是"那 N 个是什么"，
+        而系统没有"列出主题匹配但已过期的"这个出口。就地列出来。"""
+        self.assertIn("黔心守艺", self.reply("有没有非遗方向的实践").content)
+
+    def test_offers_a_way_out(self):
+        self.assertIn("不限主题再看看", self.reply("有没有非遗方向的实践").content)
+
+    def test_the_categorisation_is_shown_so_it_can_be_corrected(self):
+        """他说非遗，我按「文化传承」筛——归错了他得能当场看出来。"""
+        self.assertIn("文化传承", self.reply("有没有非遗方向的实践").content)
+
+    def test_a_real_match_is_reported_as_such(self):
+        content = self.reply("有没有志愿服务类的").content
+        self.assertIn("对得上", content)
+        self.assertNotIn("主题都对不上", content)
+
+    def test_no_theme_stated_means_no_theme_receipt(self):
+        self.assertNotIn("都算这一类", self.reply("推荐几个实践").content)
 
 
 class ExplainIntentTests(unittest.TestCase):
