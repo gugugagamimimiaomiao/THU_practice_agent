@@ -1463,7 +1463,7 @@ class PracticeChatAdapter:
                 if not in_list:
                     lines.append("  - 所以上面列出来的都不在这个范围内。")
             else:
-                lines.append("- **库里目前一个都没有。**上面列出来的都不在这个范围内。")
+                lines.append("- **库里目前一个都没有**。上面列出来的都不在这个范围内。")
             blank = sum(
                 1 for project in self._projects(include_expired=True)
                 if not project.get("demo_data") and not project_location_text(project).strip()
@@ -1659,10 +1659,10 @@ class PracticeChatAdapter:
             # 按标题查详情这条路本来就通，不用新造意图。
             names = "、".join(f"**{project['title']}**" for project in elsewhere[:4])
             more = f"，等 {len(elsewhere)} 个" if len(elsewhere) > 4 else ""
-            return (f"主题{said}：**下面几条主题都对不上。**库里主题对得上的是"
+            return (f"主题{said}：**下面几条主题都对不上**。库里主题对得上的是"
                     f"{names}{more}，但都没能进正式推荐——已经截止，或者关键字段"
                     "还没核对完。想看其中哪一条，说出标题里能区分的几个字。")
-        return (f"主题{said}：**库里目前一条都没有。**下面几条主题对不上，"
+        return (f"主题{said}：**库里目前一条都没有**。下面几条主题对不上，"
                 "只是满足了其它条件——想换个方向直接说。")
 
     def _theme_gap(self, profile: dict[str, Any],
@@ -1719,7 +1719,7 @@ class PracticeChatAdapter:
             )
             note += "下面几条**不在**你要的范围里。" if filler else ""
         else:
-            note = f"你提到了{said}：**库里目前一个都没有。**"
+            note = f"你提到了{said}：**库里目前一个都没有**。"
             if filler:
                 note += "下面几条不在这个范围内，只满足其它条件。"
 
@@ -1768,7 +1768,7 @@ class PracticeChatAdapter:
                 # 正确答案，不能再拿别的凑——实测里系统在这种时候反而输出了
                 # 整个项目库，等于把用户的话当没听见。
                 said = self._restrictions_said(profile)
-                lines.append(f"**没有完全匹配的。**你要求的是：{said}，库里现在没有同时满足这些条件的项目。")
+                lines.append(f"**没有完全匹配的**。你要求的是：{said}，库里现在没有同时满足这些条件的项目。")
                 if top:
                     lines.append(f"\n卡在：{top}")
                 lines.append("\n要我放宽哪一条，你说了我再筛——在你说之前我不会自己放。")
