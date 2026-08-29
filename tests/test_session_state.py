@@ -146,6 +146,51 @@ class OrdinalReferenceTests(unittest.TestCase):
         ]
         self.assertIsNone(self.adapter._resolve_project(messages, "第二个"))
 
+    def test_switching_projects_mid_conversation_actually_switches(self):
+        """给 A 做过材料之后再点开 B，接下来的材料必须写给 B。
+
+        原来「看过谁的详情」和「给谁做过材料」是两个函数各自倒着扫，
+        调用方先问后者、问不到才问前者——于是谁先被*问到*谁赢，
+        而不是谁更*近*谁赢。实测：
+
+            3  帮我写报名理由      -> A
+            4  宝庆微光 详细说说    -> B   用户明确换过来了
+            5  帮我写报名理由      -> A   又绑回去了
+            6  访谈提纲也来一份    -> A   一直错下去
+
+        第 5 轮往后每一份材料写的都是 A，而输出看起来完全正常。
+        """
+        messages = []
+
+        def say(text):
+            messages.append({"role": "user", "content": text})
+            result = self.adapter.reply(messages)
+            messages.append({"role": "assistant", "content": result.content})
+            return result
+
+        say("推荐一些实践")
+        say("第一个详细说说")
+        first = self.adapter._current_project(messages)
+        self.assertIsNotNone(first)
+        say("帮我写报名理由")
+        say("宝庆微光 详细说说")
+        say("帮我写报名理由")
+        bound = self.adapter._resolve_project(messages, "访谈提纲也来一份")
+        self.assertIsNotNone(bound)
+        self.assertIn("宝庆微光", bound["title"])
+        self.assertNotEqual(bound["id"], first["id"], "前提变了：这两轮点的是同一个项目，测试是空的")
+
+    def test_the_binding_self_check_reports_what_is_actually_bound(self):
+        """「是不是串线了」报的必须和实际绑定一致，否则这个出口会在
+        用户最需要它的时候撒谎。"""
+        messages = []
+        for text in ("推荐一些实践", "第一个详细说说", "帮我写报名理由", "宝庆微光 详细说说"):
+            messages.append({"role": "user", "content": text})
+            messages.append({"role": "assistant", "content": self.adapter.reply(messages).content})
+        bound = self.adapter._resolve_project(messages, "访谈提纲也来一份")
+        said = self.adapter._explain_binding(messages).content
+        self.assertIn(bound["title"], said)
+
 
 if __name__ == "__main__":
     unittest.main()

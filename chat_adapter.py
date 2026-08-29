@@ -1355,7 +1355,10 @@ class PracticeChatAdapter:
     def _explain_binding(self, messages: list[dict[str, Any]]) -> ChatResult:
         """摆出我当前认定的列表和绑定对象，让用户当场判断有没有搞混。"""
         shown = self._shown_list(messages)
-        detailed = self._last_detailed(messages)
+        # 必须跟 _resolve_project 用同一个判据。这里要是报"最近展开详情的那个"、
+        # 而实际绑的是"最近做过材料的那个"，这个自查出口就会在用户最需要它的
+        # 时候撒谎——他问「是不是串线了」，我答一个和真实绑定不同的项目。
+        detailed = self._current_project(messages)
         lines = ["## 我现在认定的是这些"]
         if shown:
             lines.append("\n你最近看到的编号列表（「第一个」「第二个」指的就是它们）：\n")
@@ -1364,8 +1367,8 @@ class PracticeChatAdapter:
             lines.append("\n我这边没有编号列表——你还没让我推荐过，或者中间换过话题。"
                          "这种时候你说「第一个」我不会瞎猜，会先问你是哪个。")
         if detailed:
-            lines.append(f"\n最近展开过详情的项目：**{detailed['title']}**。"
-                         "「它」「这个项目」指的是这一个。")
+            lines.append(f"\n当前绑定的项目：**{detailed['title']}**。"
+                         "「它」「这个项目」指的是这一个，接下来不点名地要材料也写给它。")
         lines.append(
             "\n对不上就直接说项目名，我按名字重新绑。"
             "\n\n> 这份列表是从我上一条回复里逐条还原出来的，不是猜的——"
@@ -1868,31 +1871,35 @@ class PracticeChatAdapter:
                 return found
         return []
 
-    def _last_asset_project(self, messages: list[dict[str, Any]]) -> dict[str, Any] | None:
-        """最近一次给谁做过材料。
+    def _current_project(self, messages: list[dict[str, Any]]) -> dict[str, Any] | None:
+        """当前话题落在哪个项目上：看详情和做材料，**谁更近算谁**。
 
-        材料输出的抬头统一写着「> 为「标题」…」，按标题回查即可。
-        没有这一层的话，出完推送再说「再给它写个访谈提纲」会掉回
-        「先告诉我给哪个项目写」——而上一句刚说完是给谁写的。
+        原来这是两个函数各自倒着扫，调用方先问「最近给谁做过材料」，
+        问不到才问「最近看过谁的详情」——于是谁先被*问到*谁赢，
+        而不是谁更*近*谁赢。实测：
+
+            3  帮我写报名理由            -> A（材料抬头留在 A）
+            4  宝庆微光 详细说说          -> B  用户明确换到 B 了
+            5  帮我写报名理由            -> A  又绑回去了
+            6  访谈提纲也来一份          -> A  一直错下去
+
+        第 5 轮往后每一份材料写的都是 A，而输出看起来完全正常——用户
+        除非逐字读，否则发现不了。这就是"绑错之后不会自愈"。
+
+        合成一次扫描，从后往前，先撞上哪个标记就是哪个。顺带也不用再
+        担心两个函数的判据漂开——这个项目上手工维护的并列清单已经
+        漂过五次了。
         """
         by_title = self._title_index()
         for item in reversed(messages):
             if item.get("role") != "assistant":
                 continue
-            for match in _ASSET_HEADER_RE.finditer(item.get("content") or ""):
-                title = match.group(1).strip()
-                if title in by_title:
-                    return by_title[title]
-        return None
-
-    def _last_detailed(self, messages: list[dict[str, Any]]) -> dict[str, Any] | None:
-        """最近一次展开过详情页的项目。详情页的头一行是「## 标题」。"""
-        by_title = self._title_index()
-        for item in reversed(messages):
-            if item.get("role") != "assistant":
-                continue
-            for match in _DETAIL_HEAD_RE.finditer(item.get("content") or ""):
-                title = match.group(1).strip()
+            content = item.get("content") or ""
+            # 同一条消息里两种标记都有时（详情页下面又跟了材料），
+            # 按它们在正文里出现的先后取最后那个。
+            marks = [(m.start(), m.group(1).strip()) for m in _ASSET_HEADER_RE.finditer(content)]
+            marks += [(m.start(), m.group(1).strip()) for m in _DETAIL_HEAD_RE.finditer(content)]
+            for _, title in sorted(marks, key=lambda pair: pair[0], reverse=True):
                 if title in by_title:
                     return by_title[title]
         return None
@@ -1941,7 +1948,7 @@ class PracticeChatAdapter:
             # 被模糊匹配命中了标题里含「项目」的另一条记录——指代词本身
             # 成了匹配依据，指到了一个用户根本没看过的项目上。
             if _DEICTIC_RE.search(latest):
-                anchored = self._last_detailed(messages)
+                anchored = self._current_project(messages)
                 if anchored:
                     return anchored
                 shown = self._shown_list(messages)
@@ -1955,9 +1962,9 @@ class PracticeChatAdapter:
         # 因为这句里没有项目名，模糊匹配就拿整句去撞标题，撞上了谁算谁。
         # 静默换项目比答不上来危险得多：用户拿到的材料看起来完全正常。
         if not latest_only and not self._names_a_project(latest):
-            asset = self._last_asset_project(messages)
-            if asset:
-                return asset
+            anchored = self._current_project(messages)
+            if anchored:
+                return anchored
 
         # 模糊匹配：只有当最相关的那个明显强于第二名时才认定，
         # 否则宁可让调用方列出候选让用户挑，也不猜错项目。
@@ -1976,13 +1983,10 @@ class PracticeChatAdapter:
         # 其次认列表里只有一条的情况。列表有好几条又没说是哪条，就返回 None
         # 让调用方问一句——原来这里返回 mentioned[0]（数据库顺序里的头一个），
         # 那是在猜，而且猜错时用户看不出来。
-        detailed = self._last_detailed(messages)
-        if detailed:
-            return detailed
-        # 刚给某个项目做过材料，接着说「再写个访谈提纲」指的就是它。
-        asset = self._last_asset_project(messages)
-        if asset:
-            return asset
+        # 看过详情、或刚给谁做过材料——谁更近算谁，见 _current_project。
+        anchored = self._current_project(messages)
+        if anchored:
+            return anchored
         shown = self._shown_list(messages)
         return shown[0] if len(shown) == 1 else None
 
