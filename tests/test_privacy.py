@@ -38,9 +38,23 @@ class RedactionTests(unittest.TestCase):
         out = redact_contacts(LEAKY_QUOTE)
         self.assertNotIn("13940974658", out)
         self.assertNotIn("19524895995", out)
-        self.assertIn("139****4658", out)
+        self.assertIn("139••••4658", out)
         # 名字保留——它在公开推送里，且脱掉之后这句话就读不懂了。
         self.assertIn("赵宗棋", out)
+
+    def test_mask_char_is_not_markdown_syntax(self):
+        """回复是按 Markdown 渲染的。曾经用 * 打码，139****4658 在清小搭界面上
+        被当成加粗标记吃掉，显示成 1394658——看着像个残缺号码而不是打码。"""
+        for raw, kind in [("联系 13940974658", "手机号"),
+                          ("身份证 110101199003071234", "身份证"),
+                          ("邮箱 shetuan@mail.tsinghua.edu.cn", "邮箱")]:
+            with self.subTest(kind=kind):
+                out = redact_contacts(raw)
+                self.assertNotEqual(out, raw, "这条根本没被打码")
+                added = set(out) - set(raw)
+                for ch in "*_`[]~":
+                    self.assertNotIn(ch, added,
+                                     f"{kind}的打码字符 {ch!r} 会被 Markdown 解析掉")
 
     def test_id_cards_are_masked(self):
         self.assertNotIn("110101199003071234",

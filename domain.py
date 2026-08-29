@@ -1104,6 +1104,10 @@ def recommend_projects(projects: list[dict[str, Any]], profile: dict[str, Any], 
     }
 
 
+# 打码用的字符不能是 *：回复是按 Markdown 渲染的，139****4658 里的 **** 会被
+# 当成加粗标记吃掉，界面上显示成 1394658——看起来像个残缺的号码，而不是
+# 「这里被打码了」。用 U+2022 圆点，不参与任何 Markdown 语法。
+_MASK = "•"
 _PHONE_RE = re.compile(r"(?<!\d)(1[3-9]\d)(\d{4})(\d{4})(?!\d)")
 _ID_CARD_RE = re.compile(r"(?<!\d)(\d{6})\d{8}(\d{3}[\dXx])(?!\d)")
 _EMAIL_RE = re.compile(r"([\w.+-]{1,3})[\w.+-]*(@[\w.-]+\.[A-Za-z]{2,})")
@@ -1132,10 +1136,10 @@ def redact_contacts(text: str, *, keep_email: bool = False) -> str:
     """
     if not text:
         return text
-    text = _PHONE_RE.sub(lambda m: f"{m.group(1)}****{m.group(3)}", text)
-    text = _ID_CARD_RE.sub(lambda m: f"{m.group(1)}********{m.group(2)}", text)
+    text = _PHONE_RE.sub(lambda m: f"{m.group(1)}{_MASK * 4}{m.group(3)}", text)
+    text = _ID_CARD_RE.sub(lambda m: f"{m.group(1)}{_MASK * 8}{m.group(2)}", text)
     if not keep_email:
-        text = _EMAIL_RE.sub(lambda m: f"{m.group(1)}***{m.group(2)}", text)
+        text = _EMAIL_RE.sub(lambda m: f"{m.group(1)}{_MASK * 3}{m.group(2)}", text)
     return text
 
 
