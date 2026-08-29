@@ -1,6 +1,9 @@
 __pycache__/
 *.py[cod]
 .DS_Store
+# 在挂载盘上跑测试时，SQLite 的 -shm/-wal 被「删除但仍打开」，
+# FUSE 会把它重命名成这个，然后 git add -A 就会把它收进去。
+.fuse_hidden*
 data/*.db
 data/*.db-*
 data/collector_settings.json
