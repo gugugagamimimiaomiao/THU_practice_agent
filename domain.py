@@ -1166,6 +1166,37 @@ def _site_id(name: str) -> str:
     return "site_" + hashlib.sha256(name.encode("utf-8")).hexdigest()[:10]
 
 
+# 贪婪匹配到**最后一个**行政后缀：「邵阳市新宁县第一中学」要截成
+# 「邵阳市新宁县」而不是「邵阳市」——县一级才是支教实践真正打交道的层级。
+_ADMIN_TAIL_RE = re.compile(r"^(.*(?:自治州|自治县|地区|盟|市|县|区|旗|镇|乡|街道))")
+
+
+def _admin_area(project: dict[str, Any]) -> str:
+    """行政区名，用来拼「XX教育行政部门」这类机构类别。
+
+    不能用 _location_area()——它返回的是 location.detail，真实数据里那常常是
+    一个具体场馆：「湖南省邵阳市新宁县第一中学」。拿它去拼就得到
+
+        邵阳市新宁县第一中学教育行政部门
+        邵阳市新宁县第一中学青少年活动中心/科普场馆
+
+    四个现实中不存在的机构名，还进了「推荐地点」表格。这比空着危险得多——
+    它看起来像真的，学生会拿着去搜。
+
+    所以截到行政区一级为止；截不出来就用市/省，再不行就返回空，
+    让调用方写「当地」。
+    """
+    location = project.get("location") or {}
+    for candidate in (_location_area(project), _compact_text(location.get("city")),
+                      _compact_text(location.get("province"))):
+        if not candidate:
+            continue
+        match = _ADMIN_TAIL_RE.match(candidate)
+        if match:
+            return match.group(1)
+    return _compact_text(location.get("province")) or ""
+
+
 def recommend_local_sites(project: dict[str, Any], context: dict[str, Any] | None = None) -> dict[str, Any]:
     """Create verifiable, project-aware local-site choices.
 
@@ -1174,7 +1205,11 @@ def recommend_local_sites(project: dict[str, Any], context: dict[str, Any] | Non
     claim that an organisation has agreed to receive the team.
     """
     context = context or {}
-    area = _location_area(project)
+    # 拼机构类别名要用行政区，不是场馆名。见 _admin_area 的注释：
+    # location.detail 常常是「湖南省邵阳市新宁县第一中学」这样一所具体学校，
+    # 拿它去拼就得到「…第一中学教育行政部门」这种不存在的机构。
+    area = _admin_area(project) or "当地"
+    venue = _location_area(project)
     theme, principle, default_task = _theme_work_style(project)
     corpus = " ".join([
         str(project.get("title") or ""), str(project.get("summary") or ""),
@@ -1189,7 +1224,7 @@ def recommend_local_sites(project: dict[str, Any], context: dict[str, Any] | Non
     if any(term in corpus for term in ("教育", "儿童", "学校", "教师", "科普")):
         add(f"{area}教育行政部门", "教育主管部门", "了解区域教育资源、项目对接与政策边界", ["教育资源配置", "数字工具使用", "校地协作"], "部门/事业单位")
         add(f"{area}教师发展中心或教研机构", "教研与培训机构", "核验教师培训、课程资源和落地难点", ["教师培训", "资源适配", "课程实施"], "专业机构")
-        add(f"{area}中心学校或项目方推荐学校", "学校", "观察真实教学/服务场景，优先以项目方预约为准", ["学生体验", "课堂协作", "家校沟通"], "学校")
+        add(venue or f"{area}中心学校（由项目方推荐）", "学校", "观察真实教学/服务场景，优先以项目方预约为准", ["学生体验", "课堂协作", "家校沟通"], "学校")
         add(f"{area}青少年活动中心/科普场馆", "公共教育场馆", "了解校外学习、科普服务与参与机制", ["公共教育", "科普传播", "活动运营"], "公共服务机构")
     elif any(term in corpus for term in ("乡村", "农业", "村", "振兴")):
         add(f"{area}农业农村主管部门", "农业农村主管部门", "了解产业链、项目政策和可对接村镇", ["产业发展", "基层治理", "人才回流"], "部门/事业单位")

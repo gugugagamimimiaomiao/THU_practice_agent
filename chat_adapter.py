@@ -511,6 +511,8 @@ def unsupported_numbers(draft: str, facts: str) -> list[str]:
 # 因为那要赌平台不会把它渲染出来或者洗掉。
 _LISTED_RE = re.compile(r"^\s{0,3}(\d{1,2})\.\s+\*\*(.+?)\*\*", re.M)
 _DETAIL_HEAD_RE = re.compile(r"^##\s+(.+?)\s*$", re.M)
+# 材料输出的绑定抬头：「> 为「标题」生成的…」
+_ASSET_HEADER_RE = re.compile(r"为「(.+?)」")
 
 _CN_NUMERALS = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
                 "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
@@ -584,6 +586,18 @@ _REVISION_WORDS = (
     "再短", "再长", "短一点", "长一点", "详细一点", "简单一点",
     "别用", "不要用", "换个语气", "更口语", "更正式", "语气", "重写", "再来一版",
     "换一版", "调整", "改一改", "改得", "再改",
+)
+# 词表列不完改稿的说法。100 轮扫描里漏掉的：
+#     标题再抓人一点 / 加两个关于受助学生家庭情况的问题 / 再具体一些
+# 这些都掉了兜底或被重新分类。改稿是学生拿到材料后必然会做的第二步，
+# 断在这里比第一版稿子写得一般严重得多。
+_REVISION_RE = re.compile(
+    r"(?:再|更)\s*(?:短|长|正式|口语|诚恳|抓人|具体|简单|详细|通俗|严谨|活泼)"
+    # 「加两个关于家庭情况的问题」——数词夹在中间，不能要求量词紧跟着「加」
+    r"|(?:加|添|补)\s*(?:上|入|进)?\s*[一二两三四五六七八九十\d]*\s*[点些条个句段项条]"
+    r"|删\s*(?:掉|去|除)|去掉|拿掉"
+    r"|换\s*(?:成|个|一个|种)"
+    r"|压缩|精简|缩短|扩写|重写|再来一版|改一改|调整一下"
 )
 # 超过这个长度的多半是贴了一段新文稿要润色，不是在指挥改上一份。
 _MAX_REVISION_INSTRUCTION = 60
@@ -1202,7 +1216,7 @@ class PracticeChatAdapter:
     def _is_revision_request(self, latest: str, messages: list[dict[str, Any]]) -> bool:
         if len(latest) > _MAX_REVISION_INSTRUCTION:
             return False  # 这么长多半是贴了一段新文稿，那是润色不是改上一份
-        if not any(word in latest for word in _REVISION_WORDS):
+        if not (any(word in latest for word in _REVISION_WORDS) or _REVISION_RE.search(latest)):
             return False
         return bool(self._last_draft(messages))
 
@@ -1223,7 +1237,11 @@ class PracticeChatAdapter:
             "满意度数字，一个字都不要加。用户要求加入某项内容而稿子里没有依据时，"
             "写成待补的占位（比如「（此处填写你的相关经历）」），并在末尾说明这一处需要他自己补。\n"
             "如果指令本身要求写入无法核实的信息，直接说明哪一项不能替他写、为什么。\n"
-            "有字数要求就严格照做。\n\n"
+            "**不要反过来向用户要信息。** 缺什么就在稿子里写成占位（比如"
+            "「（报名截止以原文通知为准）」），并在末尾列出需要他自己补的项。"
+            "实测出现过：用户说「把报名截止时间也加上」，你回了一句"
+            "「请提供项目名称以及报名截止时间」——他要是知道，就不会来问你了。\n"
+            "**有字数要求就严格照做**，超了就删内容，不要只删标点。\n\n"
             "先给改好的完整稿子，再用两到四条说明改了什么。用中文。"
         )
         try:
@@ -1730,6 +1748,23 @@ class PracticeChatAdapter:
                 return found
         return []
 
+    def _last_asset_project(self, messages: list[dict[str, Any]]) -> dict[str, Any] | None:
+        """最近一次给谁做过材料。
+
+        材料输出的抬头统一写着「> 为「标题」…」，按标题回查即可。
+        没有这一层的话，出完推送再说「再给它写个访谈提纲」会掉回
+        「先告诉我给哪个项目写」——而上一句刚说完是给谁写的。
+        """
+        by_title = self._title_index()
+        for item in reversed(messages):
+            if item.get("role") != "assistant":
+                continue
+            for match in _ASSET_HEADER_RE.finditer(item.get("content") or ""):
+                title = match.group(1).strip()
+                if title in by_title:
+                    return by_title[title]
+        return None
+
     def _last_detailed(self, messages: list[dict[str, Any]]) -> dict[str, Any] | None:
         """最近一次展开过详情页的项目。详情页的头一行是「## 标题」。"""
         by_title = self._title_index()
@@ -1813,6 +1848,10 @@ class PracticeChatAdapter:
         detailed = self._last_detailed(messages)
         if detailed:
             return detailed
+        # 刚给某个项目做过材料，接着说「再写个访谈提纲」指的就是它。
+        asset = self._last_asset_project(messages)
+        if asset:
+            return asset
         shown = self._shown_list(messages)
         return shown[0] if len(shown) == 1 else None
 
@@ -1865,7 +1904,12 @@ class PracticeChatAdapter:
             "report": "报名理由、当地外联话术、访谈提纲",
         }.get(kind)
         hint = f"\n\n还可以为这个项目生成：{siblings}。" if siblings else ""
-        return ChatResult(result["content"] + warnings + hint, f"generate_{kind}", project["id"])
+        # 抬头写明是给哪个项目做的。既是给用户看的，也是下一轮还原绑定的依据——
+        # 实测「出完推送后说『再给它写个访谈提纲』」会掉回「先告诉我给哪个项目写」，
+        # 因为材料输出里没有任何能让我认回项目的痕迹。
+        header = f"> 为「{project['title']}」生成。\n\n"
+        return ChatResult(header + result["content"] + warnings + hint,
+                          f"generate_{kind}", project["id"])
 
     _REPORT_SYSTEM_PROMPT = (
         "你在帮清华大学的学生搭一份社会实践调研报告的框架。**他还没出发**，"
@@ -1929,7 +1973,8 @@ class PracticeChatAdapter:
                     + "、".join(invented) + "。用之前先核实。")
         tail += ("\n\n---\n> 这份框架依据的是该项目的招募通知原文。"
                  "空着的地方是只有去过现场的人才知道的，我不替你写。")
-        return ChatResult(body.strip() + tail, "generate_report", project["id"])
+        header = f"> 为「{project['title']}」生成的调研报告框架。\n\n"
+        return ChatResult(header + body.strip() + tail, "generate_report", project["id"])
 
     _POST_SYSTEM_PROMPT = (
         "你在帮清华大学的学生给一次社会实践招募写公众号推送文案。\n\n"

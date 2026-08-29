@@ -154,6 +154,127 @@ class NegationScopeTests(unittest.TestCase):
                                 f"「{text}」里想去的地方被否定辖域吃掉了")
 
 
+class WritingFlowContinuityTests(unittest.TestCase):
+    """P0-4：写作流一追问就断。
+
+    扫描里四个不同材料类型上都断了：
+
+        帮宝庆微光写个招募推送   → 正常出稿
+        标题再抓人一点           → 「先告诉我给哪个项目写推送」
+        把报名截止时间也加上     → 「请提供项目名称…以及报名截止时间」
+        加两个关于家庭情况的问题 → 「这句我没接住」
+
+    改稿是学生拿到材料后必然会做的第二步。断在这里比第一版稿子写得一般严重得多。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tempdir = tempfile.TemporaryDirectory()
+        cls.database = Database(Path(cls.tempdir.name) / "chat.db")
+        import_article_text(
+            cls.database,
+            {"title": "赴湖南新宁支教实践支队招募", "source_account": "清华大学社会实践",
+             "source_url": "https://mp.weixin.qq.com/s/flow1"},
+            "现面向全校招募队员。\n报名截止：2036年9月10日\n参与资格：全校本科生\n报名方式：扫码\n",
+        )
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tempdir.cleanup()
+
+    def setUp(self):
+        chat_adapter.llm.is_enabled = lambda: False
+        self.adapter = PracticeChatAdapter(self.database)
+
+    def _after_material(self, follow_up: str):
+        first = self.adapter.reply(
+            [{"role": "user", "content": "帮我写赴湖南新宁支教实践支队招募的报名理由"}])
+        return self.adapter.reply([
+            {"role": "user", "content": "帮我写赴湖南新宁支教实践支队招募的报名理由"},
+            {"role": "assistant", "content": first.content},
+            {"role": "user", "content": follow_up},
+        ])
+
+    def test_material_output_carries_its_project(self):
+        result = self.adapter.reply(
+            [{"role": "user", "content": "帮我写赴湖南新宁支教实践支队招募的报名理由"}])
+        self.assertIn("为「赴湖南新宁支教实践支队招募」", result.content,
+                      "材料输出没写明是给谁做的，下一轮就认不回来了")
+
+    def test_next_material_keeps_the_binding(self):
+        for follow_up, expected in [("再给它写个访谈提纲", "generate_interview"),
+                                    ("外联话术也来一份", "generate_outreach")]:
+            with self.subTest(follow_up=follow_up):
+                self.assertEqual(self._after_material(follow_up).intent, expected)
+
+    def test_edit_phrasings_the_scan_found(self):
+        for text in ["标题再抓人一点", "加两个关于受助学生家庭情况的问题",
+                     "把最后一部分删掉", "再具体一些", "换个语气", "再来一版"]:
+            with self.subTest(text=text):
+                self.assertTrue(
+                    self.adapter._is_revision_request(
+                        text, [{"role": "assistant", "content": "尊敬的老师：我希望申请加入。"}]),
+                    f"「{text}」没被认成改稿指令")
+
+    def test_ordinary_questions_are_not_edits(self):
+        history = [{"role": "assistant", "content": "尊敬的老师：我希望申请加入。"}]
+        for text in ["推荐一些实践", "有没有加分的项目", "这个项目怎么样"]:
+            with self.subTest(text=text):
+                self.assertFalse(self.adapter._is_revision_request(text, history))
+
+    def test_revision_prompt_forbids_asking_the_user_for_data(self):
+        """实测：用户说「把报名截止时间也加上」，模型回「请提供…报名截止时间」。
+        他要是知道，就不会来问了。
+
+        断言的是真正发给模型的那段 system prompt——把它抓出来是为了让这条
+        约束不会在后续改写 prompt 时被顺手删掉。
+        """
+        captured = {}
+        chat_adapter.llm.is_enabled = lambda: True
+        chat_adapter.llm.complete = lambda system, user, **kw: captured.setdefault("s", system) and "改好了" or "改好了"
+        self.adapter.reply([
+            {"role": "user", "content": "帮我写报名理由"},
+            {"role": "assistant", "content": "尊敬的老师：我希望申请加入贵支队，长期关注乡村教育。"},
+            {"role": "user", "content": "把报名截止时间也加上"},
+        ])
+        self.assertIn("不要反过来向用户要信息", captured.get("s", ""))
+        self.assertIn("有字数要求就严格照做", captured.get("s", ""))
+
+
+class FabricatedInstitutionTests(unittest.TestCase):
+    """P1-7：外联方案批量生成不存在的机构名。
+
+    模板拿 location.detail 去拼机构类别，而那常常是一所具体学校：
+
+        邵阳市新宁县第一中学教育行政部门
+        邵阳市新宁县第一中学青少年活动中心/科普场馆
+
+    四个现实中不存在的机构名，还进了「推荐地点」表格。这比空着危险得多——
+    它看起来像真的，学生会拿着去搜。
+    """
+
+    PROJECT = {
+        "title": "赴湖南新宁支教实践支队招募", "theme_tags": ["教育"], "summary": "支教实践",
+        "location": {"province": "湖南", "city": "邵阳市", "detail": "湖南省邵阳市新宁县第一中学"},
+    }
+
+    def test_admin_area_stops_at_the_administrative_level(self):
+        from domain import _admin_area
+        self.assertEqual(_admin_area(self.PROJECT), "邵阳市新宁县")
+
+    def test_site_names_never_glue_a_venue_to_an_institution_type(self):
+        from domain import recommend_local_sites
+        for option in recommend_local_sites(self.PROJECT)["options"]:
+            self.assertNotIn("第一中学教育行政部门", option["name"])
+            self.assertNotIn("第一中学青少年活动中心", option["name"])
+
+    def test_the_real_venue_is_still_offered(self):
+        from domain import recommend_local_sites
+        names = [option["name"] for option in recommend_local_sites(self.PROJECT)["options"]]
+        self.assertTrue(any("第一中学" in name for name in names),
+                        "真实场馆反而被丢掉了")
+
+
 class TableAndStatusTests(unittest.TestCase):
     """P1-6 / P2-10：标题里的 `|` 撑坏表格；published/expired 直出英文。"""
 
