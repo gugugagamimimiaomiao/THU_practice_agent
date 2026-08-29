@@ -33,6 +33,7 @@ from domain import (
     generate_asset,
     project_location_text,
     recommend_projects,
+    redact_contacts,
 )
 
 
@@ -570,6 +571,13 @@ _STRICT_HINTS = (
 # 「我理解你想避开：云南、教育、支教」，跟他说的正好相反。
 # 「推荐三个」「给我两个」「来五条」——说了数量就按数量给，别一律五条。
 _ASK_COUNT_RE = re.compile(r"(?:推荐|给我|来|要|找|列)\s*([一二两三四五六七八九十]|\d)\s*(?:个|条|项|份)")
+
+# 用户要求代办：提交、报名、投递、联系对方。这些我做不了，也不该做，
+# 但更糟的是**默默换成"给你一份建议"**——用户会以为已经办好了。
+_ACT_FOR_ME_RE = re.compile(
+    r"帮我提交|替我提交|帮我报名|替我报名|帮我投递|帮我发过去|帮我联系|"
+    r"直接提交|直接报名|帮我交上去|你去报|你帮我报"
+)
 
 # 「换一批」「再推荐几个」——不是给新条件，是说"这批我不满意"。
 _ANOTHER_BATCH_RE = re.compile(r"换一?批|换几个|换点别的|重新推荐|再推荐|其它的|其他的|别的呢")
@@ -1993,7 +2001,15 @@ class PracticeChatAdapter:
         # 抬头写明是给哪个项目做的。既是给用户看的，也是下一轮还原绑定的依据——
         # 实测「出完推送后说『再给它写个访谈提纲』」会掉回「先告诉我给哪个项目写」，
         # 因为材料输出里没有任何能让我认回项目的痕迹。
+        # 用户说的是「提交」「帮我报名」，拿到的却是一份填写建议——中间这层
+        # 差别必须挑明。实测「帮我提交研究生支教团的报名表」直接给出成品表格，
+        # 全文没有一句说明我不能替他提交，很容易被理解成已经代办了。
         header = f"> 为「{project['title']}」生成。\n\n"
+        if _ACT_FOR_ME_RE.search(latest):
+            header = (
+                "> **我不能替你提交，也没有你的账号。** 报名要你自己在原文的报名入口完成。\n"
+                f"> 下面是给「{project['title']}」的填写建议，你复制过去核对后再提交。\n\n"
+            )
         return ChatResult(header + result["content"] + warnings + hint,
                           f"generate_{kind}", project["id"])
 
@@ -2029,7 +2045,8 @@ class PracticeChatAdapter:
         学生要它没用。同一个项目、同一份原文，凭什么写推送能用、写报告不能用。
         """
         facts = self._project_facts_block(project)
-        source = self.db.latest_article_text(project.get("source_url", ""))[:4000]
+        source = redact_contacts(
+            self.db.latest_article_text(project.get("source_url", ""))[:4000], keep_email=True)
         fallback = generate_asset(project, "report")
 
         if not llm.is_enabled() or not source:
@@ -2114,7 +2131,10 @@ class PracticeChatAdapter:
         # 把原文一起给模型。只给十来条抽取字段、却要求写 400–700 字，等于逼它编。
         # 上限 4000 字是为了控制单次请求的体量；招募通知本身通常就在这个量级内，
         # 真超了的话开头那部分（背景、理念、团队介绍）正是写文案最用得上的。
-        source = self.db.latest_article_text(project.get("source_url", ""))[:4000]
+        # 喂给模型的原文也要脱敏。133 篇原文里 19 篇含手机号，模型完全可能
+        # 把它照抄进推送——那就是我们主动把私人号码公开发布出去。
+        source = redact_contacts(
+            self.db.latest_article_text(project.get("source_url", ""))[:4000], keep_email=True)
         blocks = [f"【项目事实】\n{facts}"]
         if source:
             blocks.append(f"【原文】\n{source}")
@@ -2173,7 +2193,7 @@ class PracticeChatAdapter:
             f"实践地点：{location}",
             f"参与资格：{eligibility}",
             f"报名截止：{project.get('signup_deadline') or '待确认'}",
-            f"报名方式：{project.get('signup_method') or '待确认'}",
+            f"报名方式：{redact_contacts(project.get('signup_method') or '待确认', keep_email=True)}",
             f"经费与报销：{reimbursement}",
             f"主题标签：{'、'.join(project.get('theme_tags') or []) or '待确认'}",
             f"待确认字段：{PracticeChatAdapter._field_labels(project.get('uncertain_fields') or []) or '无'}",
@@ -2947,7 +2967,12 @@ class PracticeChatAdapter:
             "",
             f"- 状态：{_STATUS_LABELS.get(project.get('status'), project.get('status'))}",
         ]
-        lines.extend(f"- {label}：{value}" for label, value in rows if value)
+        # 「报名方式」里的邮箱是报名渠道，得留；其余字段里的联系方式一律打码。
+        keep_email = {"报名方式", "联系方式"}
+        lines.extend(
+            f"- {label}：{redact_contacts(str(value), keep_email=label in keep_email)}"
+            for label, value in rows if value
+        )
         blank = [label for label, value in rows if not value]
         if blank:
             lines.append(f"- 原文未写明：{'、'.join(blank)}——以原文通知为准")
@@ -2964,7 +2989,10 @@ class PracticeChatAdapter:
             lines += ["", "**原文依据**（可回查核对）"]
             for label, quote, where in quoted:
                 suffix = f"（{where}）" if where else ""
-                lines.append(f"- {label}：「{quote}」{suffix}")
+                # 原文依据是长引用，联系方式常常是顺带扫进来的，不是这个字段
+                # 的内容。实测「实践时间」的引用里带出了两个真人手机号。
+                lines.append(
+                    f"- {label}：「{redact_contacts(quote, keep_email=label in {'报名方式', '联系方式'})}」{suffix}")
 
         if project.get("demo_data"):
             lines += ["", "> 这是演示数据，不能作为真实报名依据。"]

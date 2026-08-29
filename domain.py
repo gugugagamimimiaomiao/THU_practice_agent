@@ -1104,6 +1104,41 @@ def recommend_projects(projects: list[dict[str, Any]], profile: dict[str, Any], 
     }
 
 
+_PHONE_RE = re.compile(r"(?<!\d)(1[3-9]\d)(\d{4})(\d{4})(?!\d)")
+_ID_CARD_RE = re.compile(r"(?<!\d)(\d{6})\d{8}(\d{3}[\dXx])(?!\d)")
+_EMAIL_RE = re.compile(r"([\w.+-]{1,3})[\w.+-]*(@[\w.-]+\.[A-Za-z]{2,})")
+
+
+def redact_contacts(text: str, *, keep_email: bool = False) -> str:
+    """把展示文本里的个人联系方式打码。
+
+    在**展示层**做，不在抽取层：库里已有的记录立刻就好，不用重跑抽取，
+    也不会被某条漏改的旧记录绕过。
+
+    为什么必须做——实测问「欢迎六字班丨生命学院迎新志愿者招募 还能报吗」，
+    项目卡的「原文依据」里直接吐出：
+
+        「时间安排 / 8月18日晚上进行迎新培训…… / 如有问题请联系 /
+          赵宗棋 139******** / 顾兆阳 195********」
+
+    用户问的是"还能报吗"，没问联系方式。这段手机号是长引用顺带扫进来的，
+    不是「实践时间」这个字段的内容。全库 51 条里 10 条中招。
+
+    手机号和身份证一律打码：它们绑定到具体的人，而原文链接就在旁边，
+    真要联系点原文去。
+    邮箱分情况——`报名方式`「联系方式」里的邮箱**就是报名渠道**，公众号公开
+    发布正是为了让人用，打掉它等于把产品的核心功能删了；但出现在其它字段的
+    引用里时，同样是顺带扫进来的，照打。
+    """
+    if not text:
+        return text
+    text = _PHONE_RE.sub(lambda m: f"{m.group(1)}****{m.group(3)}", text)
+    text = _ID_CARD_RE.sub(lambda m: f"{m.group(1)}********{m.group(2)}", text)
+    if not keep_email:
+        text = _EMAIL_RE.sub(lambda m: f"{m.group(1)}***{m.group(2)}", text)
+    return text
+
+
 def project_snapshot(project: dict[str, Any]) -> str:
     location = project.get("location", {})
     reimbursement = project.get("reimbursement", {})
@@ -1113,8 +1148,9 @@ def project_snapshot(project: dict[str, Any]) -> str:
         f"实践时间：{project.get('practice_start') or '待确认'} 至 {project.get('practice_end') or '待确认'}\n"
         f"地点：{location.get('detail') or location.get('province') or location.get('mode') or '待确认'}\n"
         f"报名截止：{project.get('signup_deadline') or '待确认'}\n"
-        f"经费：{reimbursement.get('text') or '待确认'}\n"
-        f"报名方式：{project.get('signup_method') or '待确认'}"
+        f"经费：{redact_contacts(reimbursement.get('text') or '待确认')}\n"
+        # 报名方式里的邮箱是报名渠道，保留；手机号照样打码。
+        f"报名方式：{redact_contacts(project.get('signup_method') or '待确认', keep_email=True)}"
     )
 
 
