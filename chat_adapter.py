@@ -563,6 +563,17 @@ _STRICT_HINTS = (
 # 「推荐三个」「给我两个」「来五条」——说了数量就按数量给，别一律五条。
 _ASK_COUNT_RE = re.compile(r"(?:推荐|给我|来|要|找|列)\s*([一二两三四五六七八九十]|\d)\s*(?:个|条|项|份)")
 
+# 这句话落在这个领域里吗。
+_DOMAIN_RE = re.compile(r"实践|志愿|项目|支队|支教|调研|报名|机会|活动|招募|推荐|筛|找")
+# 这句话像不像在改筛选条件。「换成湖南的」「时间改到9月」「不要校内的」
+# 这类没有任何领域词，但显然是在下指令。
+_CONSTRAINT_EDIT_RE = re.compile(
+    r"换成|换到|改成|改到|改为|换一?批|再来一?批"
+    r"|不要|不想|不考虑|不看|除了|排除"
+    r"|只要|只看|只想|仅限|必须"
+    r"|我(?:大[一二三四]|是研究生|读研|本科|研[一二三])"
+)
+
 _CLAUSE_SPLIT_RE = re.compile(r"[，,。；;！!？?、\n]+|但是|不过|然而|另外|只是|可是")
 
 
@@ -937,6 +948,17 @@ class PracticeChatAdapter:
         # 再交回规则执行。模型只输出一个标签，不产生任何事实，
         # "推荐结果和字段值全部来自规则 + SQLite" 这条底线不受影响。
         # 常见问法上面就命中了，压根走不到这里，所以延迟和成本只发生在长尾上。
+        # 这一轮只要贡献了任何筛选条件，就不许掉兜底，也不该让模型去猜意图。
+        #
+        # 100 轮实测里最伤信任的一组：
+        #     换成湖南的     → 「这句我没接住」
+        #     时间改到9月    → 一整段自我介绍（模型把它判成了 help）
+        #     算了不要支教了 → 这时前两轮的湖南和九月**又都生效了**
+        # 条件是从全部历史重抽的，跟"这一轮有没有接住"是两套逻辑。用户看到的是
+        # 连着两轮没听懂，多半在第二轮就重说一遍或者放弃了——而系统其实听懂了。
+        if self._states_a_constraint(latest):
+            return self._handle_correction(messages, all_user_text, latest)
+
         routed = self._route_by_model(messages, all_user_text, latest)
         if routed is not None:
             return routed
@@ -1279,6 +1301,23 @@ class PracticeChatAdapter:
             "所以如果上面写的和你屏幕上看到的不一样，那是真出问题了，请告诉我。"
         )
         return ChatResult("\n".join(lines), "explain_binding")
+
+    def _states_a_constraint(self, latest: str) -> bool:
+        """这一句里有没有任何能用来筛选的条件。
+
+        判据跟推荐时用的是同一套抽取器——凡是它读得出来的，就不该被当成
+        没听懂。反过来也成立：抽取器读不出来的，才有资格掉兜底。
+        """
+        # 光有条件词还不够：「今天北京天气怎么样」里有「北京」，「我对教育很感
+        # 兴趣」里有主题词，但它们都不是在下筛选指令。还得这句话要么落在这个
+        # 领域里（提到实践/志愿/项目…），要么长得像在改条件（换成/改到/不要/只要…）。
+        if not (_DOMAIN_RE.search(latest) or _CONSTRAINT_EDIT_RE.search(latest)):
+            return False
+        profile = self._extract_profile(latest)
+        return any(profile[field] for field in (
+            "preferred_locations", "excluded_locations", "themes", "excluded_themes",
+            "excluded_terms", "available_start", "grade", "department", "wanted_count",
+        )) or profile["reimbursement_preference"] != "not_important"
 
     def _states_an_exclusion(self, latest: str) -> bool:
         """这一句里有没有真的排除掉什么。判据跟推荐时用的是同一套。"""
@@ -2675,10 +2714,35 @@ class PracticeChatAdapter:
             profile["excluded_locations"] + profile["excluded_themes"] + profile["excluded_terms"]
         ))
 
+        # 这一句里我到底读出了什么。读不出来就别说"已按你的说法重新筛了一遍"——
+        # 实测「不要校内的」回了这句，却既没有排除项、列表也一条没变。
+        # 嘴上说改了、实际没改，比老实说没听懂更伤。
+        turn = self._extract_profile(latest)
+        understood = [
+            label for label, value in (
+                (f"地点「{'、'.join(turn['location_labels'])}」", turn["location_labels"]),
+                (f"不去{'、'.join(turn['excluded_locations'])}", turn["excluded_locations"]),
+                (f"主题「{'、'.join(turn['themes'])}」", turn["themes"]),
+                (f"不做{'、'.join(turn['excluded_themes'])}", turn["excluded_themes"]),
+                (f"不要{'、'.join(turn['excluded_terms'])}", turn["excluded_terms"]),
+                (f"时间 {turn['available_start']} 到 {turn['available_end']}", turn["available_start"]),
+                (f"年级「{turn['grade']}」", turn["grade"]),
+                (f"院系「{turn['department']}」", turn["department"]),
+            ) if value
+        ]
+        if not understood:
+            return ChatResult(
+                f"「{latest[:40]}」这句我没读出具体的筛选条件——可能是我认不出你说的说法。\n\n"
+                "换个说法我大概率能接住，比如：地点说省份或「京津冀」这样的区域；"
+                "时间说「九月上旬」或具体日期；排除说「不要支教」「不考虑学生骨干」。\n\n"
+                "现在的筛选条件还是上一轮那些，没有改动。",
+                "correction_not_understood",
+            )
+
         result = self._recommend(self._user_texts(messages))
-        notes = ["已按你最新的说法重新筛了一遍。"]
+        notes = [f"这一句我读到的是：{'；'.join(understood)}。已按此重新筛了一遍。"]
         if excluded_terms:
-            notes.append(f"我理解你想避开：{'、'.join(excluded_terms)}。")
+            notes.append(f"累计要避开的：{'、'.join(excluded_terms)}。")
         elif profile.get("location_strict") or profile.get("strict"):
             # 排他类的说法（「只要 X」「不要拿外地凑数」）不产生排除词，
             # 但同样改变了筛选口径，得复述出来让用户能纠正。

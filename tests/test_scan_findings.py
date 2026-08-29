@@ -82,6 +82,85 @@ class SilentConstraintTests(unittest.TestCase):
             seen[body] = text
 
 
+class FalseFallbackTests(unittest.TestCase):
+    """P1-5：「这句我没接住」是假的——条件其实已经被记下来了。
+
+    扫描里最伤信任的一组：
+
+        换成湖南的     → 「这句我没接住」
+        时间改到9月    → 一整段自我介绍（模型把它判成了 help）
+        算了不要支教了 → 这时前两轮的湖南和九月**又都生效了**
+
+    条件是从全部历史重抽的，跟"这一轮有没有接住"是两套逻辑。用户看到的是
+    连着两轮没听懂，多半在第二轮就重说一遍或者放弃了——而系统其实听懂了。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tempdir = tempfile.TemporaryDirectory()
+        cls.database = Database(Path(cls.tempdir.name) / "chat.db")
+        for title, place in [("赴湖南新宁支教实践支队招募", "湖南新宁"),
+                             ("赴云南大理调研支队招募", "云南大理")]:
+            import_article_text(
+                cls.database,
+                {"title": title, "source_account": "清华大学社会实践",
+                 "source_url": f"https://mp.weixin.qq.com/s/{abs(hash(title)) % 10 ** 9}"},
+                f"现面向全校招募队员，前往{place}开展实践。\n报名截止：2036年9月10日\n"
+                f"参与资格：全校本科生\n报名方式：扫码\n",
+            )
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tempdir.cleanup()
+
+    def setUp(self):
+        chat_adapter.llm.is_enabled = lambda: False
+        self.adapter = PracticeChatAdapter(self.database)
+
+    def test_a_turn_that_states_a_condition_never_falls_back(self):
+        for text in ["换成湖南的", "时间改到9月", "不要支教的", "只要北京的",
+                     "我大四，换一批", "不要校内的"]:
+            with self.subTest(text=text):
+                intent = self.adapter.reply([{"role": "user", "content": text}]).intent
+                self.assertNotIn(intent, {"fallback", "help"},
+                                 f"「{text}」明明给了条件，却掉了 {intent}")
+
+    def test_it_says_back_what_it_read_from_this_turn(self):
+        content = self.adapter.reply([{"role": "user", "content": "换成湖南的"}]).content
+        self.assertIn("湖南", content.split("## ")[0], "没有复述这一轮读到的条件")
+
+    def test_off_topic_still_falls_back(self):
+        """有地名不等于在筛项目。「今天北京天气怎么样」不能因此去推荐。"""
+        for text in ["今天北京天气怎么样", "我对教育很感兴趣", "社会实践是个好东西"]:
+            with self.subTest(text=text):
+                self.assertEqual(
+                    self.adapter.reply([{"role": "user", "content": text}]).intent, "fallback")
+
+    def test_unreadable_correction_says_so_instead_of_pretending(self):
+        """读不出条件时不许说"已按你的说法重新筛了一遍"。
+
+        实测「不要校内的」回了这句，却既没有排除项、列表也一条没变。
+        嘴上说改了、实际没改，比老实说没听懂更伤。
+        """
+        result = self.adapter.reply([
+            {"role": "user", "content": "推荐实践"},
+            {"role": "assistant", "content": "## 正式推荐\n\n1. **赴湖南新宁支教实践支队招募**\n"},
+            {"role": "user", "content": "要那种感觉对味儿的"},
+        ])
+        if result.intent == "correction_not_understood":
+            self.assertIn("没有改动", result.content)
+        else:
+            self.assertNotIn("已按此重新筛", result.content)
+
+    def test_campus_and_beijing_aliases(self):
+        from domain import expand_location_query
+        for text, label in [("校内的有吗", "校内"), ("只想找不用出京的", "不用出京")]:
+            with self.subTest(text=text):
+                labels, provinces = expand_location_query(text)
+                self.assertIn(label, labels)
+                self.assertTrue(provinces)
+
+
 class OrdinalNeverFuzzyTests(unittest.TestCase):
     """P0-2：「第二个」被拿去模糊匹配标题里的「第二批」。
 

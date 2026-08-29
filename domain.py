@@ -65,6 +65,19 @@ CAMPUS_TO_PROVINCE: dict[str, str] = {
 }
 
 
+# 学生说地点未必说省份。这几个是高频说法，展开成能跟项目匹配的词。
+# 「校内」不能只映射成「北京」——那会把所有北京的校外项目也算进来。
+# 它对应的是校园里那几个地名，跟 CAMPUS_TO_PROVINCE 是一套东西。
+_LOCATION_ALIASES: dict[str, tuple[str, ...]] = {
+    "校内": tuple(CAMPUS_TO_PROVINCE) + ("清华", "校园", "学生区", "教学楼"),
+    "本校": tuple(CAMPUS_TO_PROVINCE) + ("清华", "校园"),
+    "不出京": ("北京",),
+    "不用出京": ("北京",),
+    "京内": ("北京",),
+    "首都": ("北京",),
+}
+
+
 def expand_location_query(text: str) -> tuple[list[str], list[str]]:
     """从一句话里认出地域意图，返回（用户原话里的地域词，展开后的省份表）。
 
@@ -74,6 +87,10 @@ def expand_location_query(text: str) -> tuple[list[str], list[str]]:
     """
     labels: list[str] = []
     provinces: list[str] = []
+    for alias, members in _LOCATION_ALIASES.items():
+        if alias in text:
+            labels.append(alias)
+            provinces.extend(members)
     for group, members in LOCATION_GROUPS.items():
         if group in text:
             labels.append(group)
