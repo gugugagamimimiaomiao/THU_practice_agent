@@ -21,7 +21,8 @@
 """
 import unittest
 
-from domain import COLLEGE_SHORT_NAMES, KNOWN_DEPARTMENTS, department_affinity
+from domain import (COLLEGE_SHORT_NAMES, KNOWN_DEPARTMENTS, department_affinity,
+                    department_of_account)
 
 
 def project(title, **extra):
@@ -106,10 +107,40 @@ class DepartmentAffinityTests(unittest.TestCase):
         for name in COLLEGE_SHORT_NAMES:
             self.assertIn(name, KNOWN_DEPARTMENTS)
 
-    def test_all_eight_residential_colleges_are_known(self):
+    def test_every_residential_college_is_known(self):
+        """2026-08-29 被指出漏了一半。依据是订阅表里的官方号
+        （清华大学无穹/水木/自强/紫荆书院、THU臻于至善、THU为先），
+        以及库里文章正文出现过的完整写法（为先书院、至善书院、水木书院、
+        苏世民书院）。"""
         for name in ("新雅书院", "致理书院", "日新书院", "未央书院",
-                     "探微书院", "行健书院", "求真书院", "笃实书院"):
+                     "探微书院", "行健书院", "求真书院", "笃实书院",
+                     "为先书院", "至善书院", "水木书院", "自强书院",
+                     "紫荆书院", "无穹书院", "苏世民书院"):
             self.assertIn(name, KNOWN_DEPARTMENTS)
+
+    def test_ambiguous_college_names_get_no_short_name(self):
+        """这几个**故意**没有简称，别看着"缺了"就补上去。
+
+        紫荆实测在 73 条真实项目里撞 3 次，还撞上校级号「清华紫荆之声」；
+        水木是「水木清华」、自强是校训、至善是「臻于至善」、为先是普通搭配。
+        水木/自强/至善/为先 在当前样本里撞 0 次——但那只说明这批数据里
+        没出现，不说明安全。判据是这个词是不是专名，不是当前样本的计数。
+        """
+        for name in ("紫荆书院", "水木书院", "自强书院", "至善书院",
+                     "为先书院", "苏世民书院"):
+            self.assertNotIn(name, COLLEGE_SHORT_NAMES)
+
+    def test_a_college_without_a_short_name_still_resolves_by_full_name(self):
+        """没简称不等于用不了——全称和公众号别名照常命中。"""
+        self.assertEqual(
+            department_affinity(project("紫荆书院暑期实践支队招募"), "紫荆书院"),
+            "紫荆书院")
+        self.assertEqual(department_of_account("THU臻于至善"), "至善书院")
+        self.assertEqual(department_of_account("自强eEnery"), "自强书院")
+
+    def test_the_schoolwide_purple_account_is_not_a_college(self):
+        """「清华紫荆之声」是校级号，不是紫荆书院的。"""
+        self.assertEqual(department_of_account("清华紫荆之声"), "")
 
     def test_no_department_matches_an_empty_query(self):
         self.assertEqual(department_affinity(project("实践招募丨某某支队"), ""), "")
