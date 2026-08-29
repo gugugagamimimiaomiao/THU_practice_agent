@@ -397,6 +397,127 @@ class FabricatedInstitutionTests(unittest.TestCase):
                         "真实场馆反而被丢掉了")
 
 
+class VerificationScanTests(unittest.TestCase):
+    """验证扫描（第四轮）抓到的回归——**三条都是我前几轮改出来的**。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tempdir = tempfile.TemporaryDirectory()
+        cls.database = Database(Path(cls.tempdir.name) / "chat.db")
+        for title, place in [
+            ("实践招募 | “黔心守艺”赴贵州黔东南支队招募", "贵州黔东南"),
+            ("实践招募 | “清年祁旅”暑假实践支队员招募", "青海"),
+            ("实践招募 | 机械系“宝庆微光”赴湖南新宁支教实践支队招募", "湖南新宁"),
+        ]:
+            import_article_text(
+                cls.database,
+                {"title": title, "source_account": "清华大学社会实践",
+                 "source_url": f"https://mp.weixin.qq.com/s/{abs(hash(title)) % 10 ** 9}"},
+                f"现面向全校招募队员，前往{place}开展实践。\n报名截止：2036年9月10日\n"
+                f"参与资格：全校本科生\n报名方式：扫码\n",
+            )
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tempdir.cleanup()
+
+    def setUp(self):
+        chat_adapter.llm.is_enabled = lambda: False
+        self.adapter = PracticeChatAdapter(self.database)
+
+    # ── 语义倒转 ──────────────────────────────────────────────────────
+    def test_not_leaving_beijing_means_only_beijing(self):
+        """「不用出京」说的是**只在北京**，不是排除北京。
+
+        它以「不」开头，被小句切分判成否定后，唯一那条北京项目反而被踢掉了——
+        用户说的和系统做的正好相反。这是我加地点别名时引入的。
+        """
+        for text in ["我大一只想找不用出京的", "有没有不用出北京的", "不出北京的实践"]:
+            with self.subTest(text=text):
+                profile = self.adapter._extract_profile(text)
+                self.assertTrue(profile["preferred_locations"], f"「{text}」没读出想去的地方")
+                self.assertNotIn("北京", profile["excluded_locations"],
+                                 f"「{text}」把北京当成了要排除的地方")
+
+    # ── 词表泄露 ──────────────────────────────────────────────────────
+    def test_receipt_says_what_the_user_said_not_the_lookup_table(self):
+        """实测「不要校内的」把整张内部词表吐了出来，还出现「不去清华」——
+        对一个清华实践智能体来说这句话荒谬。"""
+        profile = self.adapter._extract_profile("不要校内的")
+        self.assertEqual(profile["excluded_location_labels"], ["校内"])
+        content = self.adapter.reply([{"role": "user", "content": "不要校内的"}]).content
+        self.assertNotIn("不去清华", content)
+        self.assertNotIn("紫荆、中关村", content)
+
+    # ── 静默换项目 ────────────────────────────────────────────────────
+    def test_third_material_keeps_the_same_project(self):
+        """先给 A 写报名理由、再写访谈提纲都对，第三句「外联话术也来一份」
+        却静默切到了一个完全无关的已过期项目——这句里没有项目名，
+        模糊匹配就拿整句去撞标题，撞上谁算谁。
+
+        静默换项目比答不上来危险得多：用户拿到的材料看起来完全正常。
+        """
+        first = self.adapter.reply([{"role": "user", "content": "帮我写宝庆微光的报名理由"}])
+        history = [{"role": "user", "content": "帮我写宝庆微光的报名理由"},
+                   {"role": "assistant", "content": first.content}]
+        bound = first.project_id
+        self.assertIsNotNone(bound)
+        for follow_up in ["再给它写个访谈提纲", "外联话术也来一份", "调研报告框架呢"]:
+            with self.subTest(follow_up=follow_up):
+                result = self.adapter.reply(history + [{"role": "user", "content": follow_up}])
+                self.assertEqual(result.project_id, bound,
+                                 f"「{follow_up}」换到了别的项目")
+
+    # ── 改稿抢走筛选条件 ──────────────────────────────────────────────
+    def test_a_location_change_is_not_a_draft_edit(self):
+        """写完稿之后说「换成湖南的」，改稿路径把它抢走，模型做了个空改
+        （把「邵阳市新宁县」改成「湖南省邵阳市新宁县」）。"""
+        draft = [{"role": "assistant", "content": "尊敬的老师：我希望申请加入贵支队。"}]
+        self.assertFalse(self.adapter._is_revision_request("换成湖南的", draft))
+        self.assertFalse(self.adapter._is_revision_request("时间改到9月", draft))
+        # 但内容类的「加入…」仍然是改稿——「支教」在这里是稿子的内容不是筛选条件。
+        self.assertTrue(self.adapter._is_revision_request("加入我的支教经历", draft))
+
+    # ── 换一批 ────────────────────────────────────────────────────────
+    def test_asking_for_another_batch_is_understood(self):
+        """「换一批推荐」掉进了「这句我没读出具体的筛选条件」。"""
+        result = self.adapter.reply([
+            {"role": "user", "content": "推荐一些实践"},
+            {"role": "assistant", "content": "## 正式推荐\n\n1. **实践招募 | “黔心守艺”赴贵州黔东南支队招募**\n"},
+            {"role": "user", "content": "换一批推荐"},
+        ])
+        self.assertNotEqual(result.intent, "correction_not_understood")
+        self.assertIn("换一批不会变出新项目来", result.content,
+                      "既没换也没说明为什么换不出来")
+
+    # ── 比较 ──────────────────────────────────────────────────────────
+    def test_compare_accepts_short_names(self):
+        """两条都在库里，却被判成"没点名"、静默换成两个默认项目。
+        而查详情用简称明明就能查到——两条路径的严格程度不一致。"""
+        content = self.adapter.reply(
+            [{"role": "user", "content": "比较 黔心守艺 和 清年祁旅"}]).content
+        self.assertIn("黔心守艺", content)
+        self.assertIn("清年祁旅", content)
+        self.assertNotIn("你只点了", content, "两个都认出来了却还说没认出")
+
+    def test_compare_says_when_it_substitutes(self):
+        content = self.adapter.reply(
+            [{"role": "user", "content": "比较一下黔心守艺和某个根本不存在的项目"}]).content
+        self.assertIn("你只点了", content, "悄悄换掉了用户点名的项目")
+
+    def test_compare_understands_ordinals(self):
+        first = self.adapter.reply([{"role": "user", "content": "推荐一些实践"}])
+        listed = [m.group(2) for m in chat_adapter._LISTED_RE.finditer(first.content)]
+        self.assertGreaterEqual(len(listed), 3)
+        content = self.adapter.reply([
+            {"role": "user", "content": "推荐一些实践"},
+            {"role": "assistant", "content": first.content},
+            {"role": "user", "content": "比较第一个和第三个"},
+        ]).content
+        for title in (listed[0], listed[2]):
+            self.assertIn(title.split("|")[-1].strip()[:8], content.replace("｜", "|"))
+
+
 class TableAndStatusTests(unittest.TestCase):
     """P1-6 / P2-10：标题里的 `|` 撑坏表格；published/expired 直出英文。"""
 

@@ -540,7 +540,14 @@ _NEGATION_LEADS = (
 # 把文化传承主题扔进排除表。非遗是这个领域的常用词，不是否定。
 _NEGATION_PREFIXES = ("不", "别", "勿", "无需", "毋须")
 # 这几个「不X」是肯定语义，别误当否定。
-_NOT_ACTUALLY_NEGATIVE = ("不限", "不错", "不少", "不仅", "不止", "不但", "不管", "不论")
+_NOT_ACTUALLY_NEGATIVE = (
+    "不限", "不错", "不少", "不仅", "不止", "不但", "不管", "不论",
+    # 「不用出京」「不出北京」说的是**只在北京**，不是排除北京。
+    # 它们以「不」开头，被小句切分判成否定后，唯一那条北京项目反而被踢掉了——
+    # 用户说的和系统做的正好相反。这类"否定形式、肯定语义"的说法必须单列。
+    "不出京", "不用出京", "不出北京", "不用出北京", "不离京", "不出校",
+    "不用出校", "不出学校",
+)
 
 
 def _is_negative_clause(clause: str) -> bool:
@@ -563,6 +570,9 @@ _STRICT_HINTS = (
 # 「我理解你想避开：云南、教育、支教」，跟他说的正好相反。
 # 「推荐三个」「给我两个」「来五条」——说了数量就按数量给，别一律五条。
 _ASK_COUNT_RE = re.compile(r"(?:推荐|给我|来|要|找|列)\s*([一二两三四五六七八九十]|\d)\s*(?:个|条|项|份)")
+
+# 「换一批」「再推荐几个」——不是给新条件，是说"这批我不满意"。
+_ANOTHER_BATCH_RE = re.compile(r"换一?批|换几个|换点别的|重新推荐|再推荐|其它的|其他的|别的呢")
 
 # 这句话落在这个领域里吗。
 _DOMAIN_RE = re.compile(r"实践|志愿|项目|支队|支教|调研|报名|机会|活动|招募|推荐|筛|找")
@@ -1129,7 +1139,8 @@ class PracticeChatAdapter:
                     merged[field] = turn[field]
             if turn["reimbursement_preference"] != "not_important":
                 merged["reimbursement_preference"] = turn["reimbursement_preference"]
-            for field in ("excluded_locations", "excluded_themes", "excluded_terms"):
+            for field in ("excluded_locations", "excluded_location_labels",
+                          "excluded_themes", "excluded_terms"):
                 merged[field] = list(dict.fromkeys(merged[field] + turn[field]))
             for flag in ("location_strict", "strict"):
                 merged[flag] = merged[flag] or turn[flag]
@@ -1153,6 +1164,7 @@ class PracticeChatAdapter:
             "preferred_locations": [],
             "location_labels": [],
             "excluded_locations": [],
+            "excluded_location_labels": [],
             "excluded_themes": [],
             "excluded_terms": [],
             "wanted_count": 0,
@@ -1165,7 +1177,8 @@ class PracticeChatAdapter:
         negative_clauses = [c for c in _split_clauses(text) if _is_negative_clause(c)]
         if negative_clauses:
             joined = "，".join(negative_clauses)
-            _, profile["excluded_locations"] = expand_location_query(joined)
+            (profile["excluded_location_labels"],
+             profile["excluded_locations"]) = expand_location_query(joined)
             profile["excluded_themes"] = [
                 theme for theme, words in THEME_KEYWORDS.items()
                 if theme in joined or any(word.lower() in joined.lower() for word in words)
@@ -1240,6 +1253,18 @@ class PracticeChatAdapter:
         if len(latest) > _MAX_REVISION_INSTRUCTION:
             return False  # 这么长多半是贴了一段新文稿，那是润色不是改上一份
         if not (any(word in latest for word in _REVISION_WORDS) or _REVISION_RE.search(latest)):
+            return False
+        # 这句要是给出了筛选条件，那它是在改筛选口径，不是在改稿子。
+        #
+        # 实测：写完报名理由之后说「换成湖南的」被改稿路径抢走，模型做了一个
+        # 毫无意义的空改（把「邵阳市新宁县」改成「湖南省邵阳市新宁县」）。
+        # 同一句话在推荐语境下是正确识别地点条件的正例——放宽改稿识别的副作用。
+        #
+        # 只看地点和时间，不看主题：「加入我的支教经历」里的"支教"是稿子的内容，
+        # 不是筛选条件。地点和时间在改稿指令里几乎不会当内容出现，拿它们做判据
+        # 才不会误伤。
+        turn = self._extract_profile(latest)
+        if turn["preferred_locations"] or turn["excluded_locations"] or turn["available_start"]:
             return False
         return bool(self._last_draft(messages))
 
@@ -1877,6 +1902,17 @@ class PracticeChatAdapter:
                 shown = self._shown_list(messages)
                 if len(shown) == 1:
                     return shown[0]
+
+        # 这一句没有点名任何项目、而刚刚又给某个项目做过材料时，指的就是它。
+        #
+        # 必须排在模糊匹配之前。实测：先给 A 写报名理由、再写访谈提纲都对，
+        # 第三句「外联话术也来一份」却静默切到了一个完全无关的已过期项目——
+        # 因为这句里没有项目名，模糊匹配就拿整句去撞标题，撞上了谁算谁。
+        # 静默换项目比答不上来危险得多：用户拿到的材料看起来完全正常。
+        if not latest_only and not self._names_a_project(latest):
+            asset = self._last_asset_project(messages)
+            if asset:
+                return asset
 
         # 模糊匹配：只有当最相关的那个明显强于第二名时才认定，
         # 否则宁可让调用方列出候选让用户挑，也不猜错项目。
@@ -2736,8 +2772,12 @@ class PracticeChatAdapter:
         # 排除项的抽取统一交给 _extract_profile 的否定小句逻辑，这里只负责复述，
         # 不再维护第二套「不要+词表」的拼接规则——两套规则迟早会不一致。
         profile = self._profile_from_turns(self._user_texts(messages))
+        # 复述用原话标签（「校内」），不是展开后的匹配词（紫荆、中关村、清华园…）。
+        # 实测「不要校内的」把整张内部词表吐了出来，还出现了「不去清华」——
+        # 对一个清华实践智能体来说这句话荒谬。
         excluded_terms = list(dict.fromkeys(
-            profile["excluded_locations"] + profile["excluded_themes"] + profile["excluded_terms"]
+            profile["excluded_location_labels"] + profile["excluded_themes"]
+            + profile["excluded_terms"]
         ))
 
         # 这一句里我到底读出了什么。读不出来就别说"已按你的说法重新筛了一遍"——
@@ -2747,7 +2787,7 @@ class PracticeChatAdapter:
         understood = [
             label for label, value in (
                 (f"地点「{'、'.join(turn['location_labels'])}」", turn["location_labels"]),
-                (f"不去{'、'.join(turn['excluded_locations'])}", turn["excluded_locations"]),
+                (f"不去{'、'.join(turn['excluded_location_labels'])}", turn["excluded_location_labels"]),
                 (f"主题「{'、'.join(turn['themes'])}」", turn["themes"]),
                 (f"不做{'、'.join(turn['excluded_themes'])}", turn["excluded_themes"]),
                 (f"不要{'、'.join(turn['excluded_terms'])}", turn["excluded_terms"]),
@@ -2756,6 +2796,17 @@ class PracticeChatAdapter:
                 (f"院系「{turn['department']}」", turn["department"]),
             ) if value
         ]
+        # 「换一批」「再推荐几个」不是在给新条件，是在说"这批我不满意"。
+        # 之前掉进了「这句我没读出具体的筛选条件」——用户会觉得连这都听不懂。
+        if not understood and _ANOTHER_BATCH_RE.search(latest):
+            result = self._recommend(self._user_texts(messages))
+            return ChatResult(
+                "条件没变，我按原条件重新排了一遍。库里符合条件的就这些，"
+                "**换一批不会变出新项目来**——想看到不一样的，得放宽某个条件"
+                "（比如去掉地点限制、换个时间段），或者说「还有哪些实践机会」看全部在招项目。\n\n"
+                + result.content,
+                "recommend_again", result.project_id,
+            )
         if not understood:
             return ChatResult(
                 f"「{latest[:40]}」这句我没读出具体的筛选条件——可能是我认不出你说的说法。\n\n"
@@ -2782,19 +2833,47 @@ class PracticeChatAdapter:
     def _compare(self, messages: list[dict[str, Any]], text: str) -> ChatResult:
         projects = self._projects(include_expired=True)
         mentioned = [project for project in projects if project["title"] in text or project["id"] in text]
+
+        # 简称也要认。原来只做整标题包含匹配，于是「比较一下黔心守艺和清年祁旅」
+        # ——两条都在库里——被判成"没点名"，静默换成两个默认项目，全程一句说明都没有。
+        # 而查详情用简称明明就能查到，两条路径的解析严格程度不一致。
+        if len(mentioned) < 2:
+            for part in re.split(r"和|与|跟|、|vs|VS|,|，", _COMPARE_RE.sub("", text)):
+                part = part.strip()
+                if len(part) < 2:
+                    continue
+                hit = self._resolve_project([], part, latest_only=True, loose=True)
+                if hit and hit not in mentioned and _distinctive_overlap(hit["title"], part):
+                    mentioned.append(hit)
+
+        # 用户提到的序数（「比较第一个和第三个」）指的是他刚看到的那份列表。
+        shown = self._shown_list(messages)
+        if len(mentioned) < 2 and shown:
+            picked = [shown[n - 1] for n in
+                      (int(m) if m.isdigit() else _CN_NUMERALS.get(m, 0)
+                       for m in _ORDINAL_RE.findall(text))
+                      if 1 <= n <= len(shown)]
+            for project in picked:
+                if project not in mentioned:
+                    mentioned.append(project)
+
+        asked = len(mentioned)
         if len(mentioned) < 2:
             profile = self._extract_profile(text)
             recommendation = recommend_projects(projects, profile)
-            mentioned = [item["project"] for item in recommendation["eligible"][:2]]
+            for item in recommendation["eligible"]:
+                if item["project"] not in mentioned:
+                    mentioned.append(item["project"])
+                if len(mentioned) >= 2:
+                    break
         if len(mentioned) < 2:
             return ChatResult("目前没有两个已核验项目可供比较。请提供两个项目名称。", "compare_needs_projects")
         a, b = mentioned[:2]
         # 用户点名了项目、却没找到时必须说清楚换成了谁。
         # 实测「比较一下宝庆微光和助梦1+1」把助梦1+1 悄悄换成了研究生支教团，
         # 全程一句说明都没有——用户会以为自己在看助梦1+1 的数据。
-        named = [project["title"] for project in projects
-                 if project["title"] in text or project["id"] in text]
-        substituted = [p["title"] for p in (a, b) if p["title"] not in named] if named else []
+        # asked 是上面真正解析出来的个数；不足两个时补位的那些都要点名。
+        substituted = [project["title"] for project in mentioned[asked:2]]
         rows = [
             ("状态", _STATUS_LABELS.get(a.get("status"), a.get("status")),
              _STATUS_LABELS.get(b.get("status"), b.get("status"))),
@@ -2809,8 +2888,9 @@ class PracticeChatAdapter:
         table = [f"| 维度 | {_cell(a['title'])} | {_cell(b['title'])} |", "|---|---|---|"]
         table.extend(f"| {label} | {_cell(left)} | {_cell(right)} |" for label, left, right in rows)
         if substituted:
-            table.insert(0, f"> 你点名的项目里有找不到的，我用「{'、'.join(substituted)}」补上了。"
-                            "要比别的就把项目名说全一点。\n")
+            table.insert(0, f"> **你只点了 {asked} 个项目**（或者我没认出来），"
+                            f"另一个我用「{'、'.join(substituted)}」补上了——"
+                            "这不是你要比的那个。要比别的就把项目名多说几个字。\n")
         table.append("\n以上信息来自项目卡；正式报名仍应打开原文核对最新通知。")
         table.append(f"\n接下来可以说：「帮我写{a['title']}的报名理由」，或者直接说出其中一个项目名看它的原文依据。")
         return ChatResult("\n".join(table), "compare")
