@@ -133,6 +133,68 @@ COLLEGE_SHORT_NAMES = {
     "探微书院": "探微", "行健书院": "行健", "求真书院": "求真", "笃实书院": "笃实",
 }
 
+# 公众号号名 → 院系。号名里看不出院系的那些，靠这张表。
+#
+# 书院不用进表：它们的号名本身就带简称（THU长乐未央、探微观止、THU天行健、
+# THU笃实光辉、强基致理想、THU求真寻理），COLLEGE_SHORT_NAMES 已经能命中。
+#
+# 每一条的依据都写在后面，来自库里这个号发的文章正文里提到该院系的次数。
+# 不靠回忆——凭印象猜「象图学院是哪个系」这种事，错了没人看得出来，
+# 而后果是把一批项目静默地归给错误的院系。查不到依据的号一律不进表，
+# 见下面 _UNMAPPED_ACCOUNTS。
+DEPARTMENT_ACCOUNT_ALIASES = {
+    # —— 库里有正文证据的 ——
+    "酒井资讯": "计算机系",        # 正文提到「计算机系」48 次
+    "莱小福": "生命学院",          # 8 次
+    "无限之声": "电子系",          # 7 次
+    "建院宣传中心": "建筑学院",     # 4 次
+    "THU清清园中葵": "日新书院",    # 3 次
+    # —— 号名本身含院系词干，只是不含全称 ——
+    "机械之声": "机械系",
+    "机械正发声": "机械系",
+    "建院学生会THU": "建筑学院",
+    "精小仪": "精仪系",
+    "精仪系研究生": "精仪系",
+    "车辆人": "车辆学院",
+    "电机之声": "电机系",
+    "清华经管家园": "经管学院",
+    "公管声音": "公管学院",
+    "清美团宣": "美术学院",
+}
+
+# **校级号绝对不能进上面那张表。**
+#
+# 它们发的文章会提到各种院系（「清华大学社会实践」的正文里机械系出现 6 次、
+# 新雅书院 6 次），映射过去会把全校项目静默地算成某一个院系的——比按院系
+# 不加权还糟，因为它是错的而不是没有。
+SCHOOLWIDE_ACCOUNTS = frozenset({
+    "清华大学", "清华紫荆之声", "清华大学学生会", "清华大学社会实践",
+    "清华大学学生公益", "清华大学学生社团", "清华大学小研在线",
+    "清华大学乡村振兴工作站", "清小搭对话导入",
+})
+
+# 订阅列表里还有一批号，我查不出它对应哪个院系（象图学院、茶园资讯、
+# 吾道清年、卡安、天工物华、清物语、数无穹……）。号名是别称或典故，库里
+# 又还没有它们的文章可供佐证。这些**故意不进表**：猜错了没人看得出来，
+# 而后果是把项目归给错误的院系。等采到文章、正文里能对上了再补。
+_UNMAPPED_ACCOUNTS_NOTE = "见 wechat_sources.DEPARTMENT_ACCOUNTS，未映射的按无院系处理"
+
+
+def department_of_account(account: str) -> str:
+    """这个公众号属于哪个院系；校级号和查不出的一律返回空。"""
+    account = (account or "").strip()
+    if not account or account in SCHOOLWIDE_ACCOUNTS:
+        return ""
+    if account in DEPARTMENT_ACCOUNT_ALIASES:
+        return DEPARTMENT_ACCOUNT_ALIASES[account]
+    for department in KNOWN_DEPARTMENTS:
+        if department in account:
+            return department
+    for department, short in COLLEGE_SHORT_NAMES.items():
+        if short in account:
+            return department
+    return ""
+
 
 def department_affinity(project: dict[str, Any], department: str) -> str:
     """这个项目是不是这个院系/书院自己办的；是就返回命中的那个写法。
@@ -153,6 +215,11 @@ def department_affinity(project: dict[str, Any], department: str) -> str:
     """
     if not department or not _is_practice_like(project):
         return ""
+    # 先看发布号。别名表是逐条查过依据的，比在正文里碰子串可靠；而且校级号
+    # 在这一步就被挡掉了——「清华大学社会实践」的正文里机械系出现 6 次，
+    # 不挡的话全校项目都会被算成机械系的。
+    if department_of_account(str(project.get("source_account") or "")) == department:
+        return department
     blob = " ".join(str(project.get(field) or "") for field in
                     ("title", "organizer", "source_account", "summary"))
     if department in blob:
@@ -1166,6 +1233,13 @@ def score_project(project: dict[str, Any], profile: dict[str, Any], *, today: da
     # 计算机系学生问「推荐几个暑期实践」，前三名是「学生节征名」「男篮招新」
     # 「中长跑队招新」——酒井资讯是计算机系的号，这些全被判成"本院系发的"。
     # 「本院系」应该是同类之中优先，不是把不同类的顶上来。
+    # 体育队招新、学生节征名、部门招新这些不是社会实践，但确实在库里
+    # （采集范围偏宽是另一件事）。不删，只压到后面去——用户问「推荐几个
+    # 暑期实践」时它们不该出现在前排。扣 12 分：足以让它们让位给任何一条
+    # 真实践，又不至于把它们打到完全看不见（有人确实在找体育队）。
+    if not _is_practice_like(project):
+        score -= 12
+
     affinity = department_affinity(project, str(profile.get("department", "")).strip())
     if affinity:
         score += 20

@@ -992,6 +992,9 @@ POST_WORDS = (
     "招募推送", "朋友圈文案", "宣传推送",
 )
 DETAIL_WORDS = ("详情", "介绍", "资格", "截止", "报销", "地点", "时间", "这个项目", "怎么样", "什么条件")
+# 「看看那 22 条线索」「线索都有哪些」——要看的是待核验那一堆，不是正式推荐。
+_LEADS_RE = re.compile(r"线索|待核验|没核实|未核实|待复核|复核队列")
+
 LIST_WORDS = (
     "项目列表", "全部项目", "近期项目", "实践机会", "有哪些", "还有哪些",
     "快截止", "最近截止", "都有什么",
@@ -1223,6 +1226,12 @@ class PracticeChatAdapter:
             return ChatResult(self._project_detail(project), "project_detail", project["id"])
         if any(word in normalized for word in ["hello", "hi"]) or any(word in latest for word in ["你好", "您好", "你是谁", "怎么用", "帮助", "能做什么"]):
             return ChatResult(self._welcome(), "help")
+        # 「看看那 22 条线索」是我们自己在「接下来可以说」里教用户说的，可它
+        # 一直没有对应的分支——落到 LIST_WORDS 里的「看看」，结果先甩一屏
+        # 正式推荐，用户要的线索被埋在底下。_next_steps 的注释里写着
+        # 「提一件做不到的事比不提更糟」，这就是自己犯了那一条。
+        if _LEADS_RE.search(latest):
+            return ChatResult(self._list_leads(), "list_leads")
         if any(word in latest for word in LIST_WORDS):
             return ChatResult(self._list_projects(), "list_projects")
         # 只说了项目名（没带其它意图词）时，直接给项目卡而不是兜底菜单——
@@ -1411,6 +1420,23 @@ class PracticeChatAdapter:
         "项目", "实践", "招募", "活动", "支队", "推荐", "报名", "同学",
         "学生", "工作", "计划", "通知", "开展", "参加", "地方", "东西",
     })
+
+    # 「用户说的具体词，库里有没有」这个功能试过，砍了，别再做第二遍。
+    #
+    # 起因是真问题：「我喜欢和小朋友书信交流的志愿」——「书信」「小朋友」是这句
+    # 话的全部信息量，抽取只留下最宽的「公益志愿」（覆盖 44%），回执还理直气壮
+    # 地说「上面 5 条对得上」。而库里「书信」「写信」「笔友」各 0 条。
+    #
+    # 做法是拿滑动窗口切 2-3 字片段去库里数。实测切出来的是：
+    #     「我喜欢」「喜欢和」「欢和小」   —— 而「书信」「小朋友」反倒没切出来
+    #     「推荐几个志愿」 -> 「推荐几」「荐几个」
+    #     「有经费的优先」 -> 「有经费」「经费的」「费的优」
+    # 停用词表补不完，因为错的不是词表，是"中文没有空格"这件事本身。
+    # 要做对得上分词，而这个项目是零第三方依赖。
+    #
+    # 留一个会在正常请求里冒出「费的优」的版本，比不做更糟——它会砸掉整个
+    # 回执区的可信度。改成不需要分词也能说实话的办法：在主题那行里挑明
+    # "这是大类匹配"，见 _theme_note。
 
     def _terms_worth_excluding(self, text: str) -> list[str]:
         """从否定小句里挑出能真正落到项目上的片段。
@@ -1848,6 +1874,8 @@ class PracticeChatAdapter:
         theme_note = self._theme_note(profile, result)
         if theme_note:
             rows.append(theme_note)
+        # 主题标签是粗筛，装不下「书信交流」这种具体诉求——但装不下不等于
+        # 可以假装装下了。他说的具体词库里一条都没有，就得说。
         time_note = self._time_note(profile, result)
         if time_note:
             rows.append(time_note)
@@ -1987,7 +2015,9 @@ class PracticeChatAdapter:
             for theme in wanted)
         carried = self._carried(profile, "themes")
         if shown_hits:
-            note = f"主题{said}{carried}：上面 {shown_hits} 条对得上，已经排在前面。"
+            note = (f"主题{said}{carried}：上面 {shown_hits} 条对得上，已经排在前面。"
+                    "**这是大类匹配**——你要是有更具体的想法（某种形式、某类对象），"
+                    "我的分类到不了那个粒度，得你自己看标题挑。")
             if len(shown) > shown_hits:
                 note += (f"其余 {len(shown) - shown_hits} 条**主题对不上**，"
                          "是按时间和信息完整度补的。")
@@ -2137,7 +2167,11 @@ class PracticeChatAdapter:
             # 实测里学生分不出来——一条 2036 年截止、没有原文链接的导入线索，
             # 看起来跟真实招募没区别。这里改成把"这还不算数"写在最前面，
             # 并且明确点出没有原文可查的那些。
-            lines.append("\n## 线索（尚未核实，不能作为报名依据）")
+            # 条数要写清楚。原来标题不带数字，下面只列 3 条，而「接下来可以说」
+            # 里写着「看看那 22 条线索」——两个数字对不上，看起来像在自相矛盾。
+            total_leads = len(result["potential"])
+            more = f"，这里先列 3 条" if total_leads > 3 else ""
+            lines.append(f"\n## 线索（共 {total_leads} 条，尚未核实，不能作为报名依据{more}）")
             lines.append("采集到但**还没核对完**，字段可能有误，也可能根本不存在：")
             # 每条只留标题。原来把两条 warning 全展开，这一段占了整条回复的
             # 四分之一（1272 字里的 317），而"为什么待核验"是追问时才需要的细节，
@@ -3572,6 +3606,36 @@ class PracticeChatAdapter:
         lines.append(
             "\n接下来可以说：「帮我写这个项目的报名理由」，或者「比较这个和另一个项目名」。"
         )
+        return "\n".join(lines)
+
+    def _list_leads(self) -> str:
+        """只列待核验的线索，不掺正式推荐。
+
+        用户点「看看那 22 条线索」时想看的就是那 22 条。原来这句掉进
+        list_projects，先甩一屏已核验项目，线索被埋在底下——他不得不
+        自己在两段之间找。
+        """
+        leads = [p for p in self._projects(include_expired=True)
+                 if p.get("status") == "needs_review" and not p.get("demo_data")]
+        if not leads:
+            return ("现在没有待核验的线索——采集到的都已经核对完了。\n\n"
+                    "说「推荐几个实践」看正式推荐，或者把手上的招募通知粘给我。")
+        lines = [f"## 待核验线索（共 {len(leads)} 条）", "",
+                 "**这些还不算数**：采集到了但还没人工核对完，字段可能有误，"
+                 "个别甚至可能根本不存在。不要凭这里的信息去报名。", ""]
+        for index, project in enumerate(leads[:15], 1):
+            missing = self._field_labels(project.get("uncertain_fields", []))
+            why = f"待确认：{missing}" if missing else "字段齐了，等人工过一遍"
+            lines.append(f"{index}. **{project['title']}**")
+            lines.append(f"   - {why}")
+            if project.get("source_url"):
+                lines.append(f"   - 原文：<{project['source_url']}>")
+            else:
+                lines.append("   - **没有原文链接可查**，无法核实是否真实存在")
+        if len(leads) > 15:
+            lines.append(f"\n（还有 {len(leads) - 15} 条，先说个方向我再筛）")
+        lines.append("\n想看某一条卡在哪，说出它标题里能区分的几个字。"
+                     "\n\n> 核验通过之后它们才会进正式推荐。")
         return "\n".join(lines)
 
     def _list_projects(self) -> str:
