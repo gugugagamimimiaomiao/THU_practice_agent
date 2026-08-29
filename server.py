@@ -30,6 +30,7 @@ from chat_adapter import (
     ChatRequestError,
     PracticeChatAdapter,
     completion_payload,
+    looks_like_injection,
     model_list,
     openai_error,
     resolve_max_tokens,
@@ -326,13 +327,19 @@ class Handler(BaseHTTPRequestHandler):
                 # 只记未命中的这一类，且截断到 80 字——够看出意图，不留完整聊天记录。
                 # 以 _blocked 结尾的是提示词泄漏拦截，属于安全事件：量很小，
                 # 但一旦有人在反复试，得能看出来。
+                latest_user = next(
+                    (m["content"] for m in reversed(messages)
+                     if m["role"] == "user" and m["content"].strip()),
+                    "",
+                )
                 if (result.intent in {"fallback", "writing_help", "about_practice"}
                         or result.intent.endswith("_blocked")):
-                    latest_user = next(
-                        (m["content"] for m in reversed(messages) if m["role"] == "user" and m["content"].strip()),
-                        "",
-                    )
                     note["asked"] = latest_user.strip()[:80]
+                # 注入特征只记 true/false，不记原话：polish / revise 收到的是
+                # 用户贴的正文（个人陈述、报名理由），不该整段留在库里，但
+                # "有没有人在反复试"这个信号得能看见。
+                if looks_like_injection(latest_user):
+                    note["injection_hint"] = True
                 DB.log("chat", f"完成清小搭对话：{result.intent}", note)
             if stream:
                 self.send_response(200)

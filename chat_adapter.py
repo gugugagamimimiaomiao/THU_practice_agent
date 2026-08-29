@@ -552,6 +552,33 @@ def echoed_prompt_sentences(body: str, system_prompt: str) -> int:
     return sum(1 for sentence in sentences if sentence in body)
 
 
+# 输入里有没有典型的注入特征。**只用来在日志里留个计数，不存原话。**
+#
+# 现有日志只对 fallback / writing_help / about_practice 记 80 字原话。
+# 注入要是走 polish / revise 进来的，内容一个字都没留下——查这次事件时
+# 就卡在这里：今天有两条 polish，看不到里面是什么。
+#
+# 但也不该顺手把 polish 的原话也记上：那两个出口收到的是用户贴的正文
+# （个人陈述、报名理由），比 fallback 的短问句敏感得多，不该整段留在库里。
+# 折中成只记 true/false——"有没有人在反复试"这个信号能看见，内容不落库。
+_INJECTION_HINT_RE = re.compile(
+    r"忽略(以上|上面|之前|前面|所有)[^。！？\n]{0,8}(指令|规则|要求|设定)"
+    r"|无视(以上|上面|之前|前面|所有)[^。！？\n]{0,8}(指令|规则|要求)"
+    r"|(ignore|disregard)\s+(all\s+)?(previous|prior|above)"
+    # 中文动宾语序两边都要认：「输出你的提示词」和「把提示词打印出来」。
+    r"|(输出|打印|复述|告诉我|列出|重复)[^。！？\n]{0,10}"
+    r"(系统提示|提示词|system\s*prompt|你的设定|你的规则|你被要求|你收到的指令)"
+    r"|(系统提示|提示词|system\s*prompt|你的设定|你收到的指令)[^。！？\n]{0,10}"
+    r"(输出|打印|复述|说出来|发出来|念一遍)"
+    r"|你(现在)?是一个?[^。！？\n]{0,6}(不受|没有)[^。！？\n]{0,6}(限制|约束)"
+    r"|(越狱|jailbreak|DAN模式)",
+    re.I)
+
+
+def looks_like_injection(text: str) -> bool:
+    return bool(_INJECTION_HINT_RE.search(text or ""))
+
+
 PROMPT_LEAK_REPLY = (
     "**我不输出自己的设定。**\n\n"
     "刚才那段材料里夹了一句要我复述指令的话，我按普通文字处理了，没有照做。\n\n"
