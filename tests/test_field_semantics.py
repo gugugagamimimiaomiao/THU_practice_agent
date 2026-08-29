@@ -17,7 +17,8 @@
 """
 import unittest
 
-from domain import _extract_eligibility, _extract_reimbursement
+from domain import (THEME_SCAN_CHARS, _extract_eligibility, _extract_reimbursement,
+                    _extract_themes)
 
 DUTY_WITH_MONEY = (
     "宣传部综合工作组的工作主要分为联络和综合两个部分。联络工作的主要内容是构建校-系两级"
@@ -136,6 +137,55 @@ class EligibilitySemanticsTests(unittest.TestCase):
         skipped = "我们是社团运行的“数字大脑”，负责规划、建设并持续运营全校学生社团的一站式信息平台。欢迎加入"
         self.assertTrue(_extract_eligibility([kept])[0]["restriction_text"])
         self.assertFalse(_extract_eligibility([skipped])[0]["restriction_text"])
+
+
+class ThemeTaggingTests(unittest.TestCase):
+    """主题标签只看标题 + 正文开头。
+
+    原来拿整篇正文撞词表、命中一次即算，43 条真实数据里 28 条被打了 4-5 个
+    主题（词表总共才 8 个），「公益志愿」覆盖 42/43。标签没有区分度，而推荐
+    的理由行拿它当依据写「匹配主题偏好：文化传承」——用户问非遗看到这行字，
+    会以为系统读懂了。理由撒谎比排序不准严重。
+    """
+
+    def test_a_passing_mention_deep_in_the_body_is_not_a_theme(self):
+        body = "本部门负责校团委日常事务。" + "。" * THEME_SCAN_CHARS + "往期我们也办过非遗文化展。"
+        self.assertNotIn("文化传承", _extract_themes("2026年秋校团委组织部学生骨干招募", body))
+
+    def test_the_title_always_counts(self):
+        self.assertIn("文化传承",
+                      _extract_themes("非遗保护调研支队招募", "。" * 3000))
+
+    def test_a_theme_stated_up_front_is_kept(self):
+        body = "本支队赴湘西开展非遗技艺的传承现状调研，走访传统手工艺人。"
+        self.assertIn("文化传承", _extract_themes("实践招募 | 赴湘西调研支队", body))
+
+    def test_nothing_matching_falls_back_to_the_generic_tag(self):
+        self.assertEqual(_extract_themes("体育助教报名通知", "为保障新生体育工作有序开展。"),
+                         ["综合实践"])
+
+    def test_a_specific_word_counts_even_once(self):
+        """「支教」出现一次就够。一刀切要求两次会漏掉真项目——实测
+        「筑梦建行·春山在望」正文写着"中学生夏令营支教实践"，只此一处。"""
+        self.assertIn("教育", _extract_themes("实践招募丨赴霍邱一中支队",
+                                             "实践补招募 中学生夏令营支教实践 地区概况……"))
+
+    def test_a_generic_word_needs_more_than_one_mention(self):
+        """「健康」出现一次不能给整条定调——实测「百名硕博建功邯郸」
+        就是这么被定成唯一标签 健康医疗 的。"""
+        body = "为落实团河北省委关于人才工作的要求，面向京津冀高校公开选拔硕博，服务地方发展，关心青年健康成长。"
+        self.assertNotIn("健康医疗", _extract_themes("百名硕博建功行动招募公告", body))
+
+    def test_tags_are_ranked_by_hits_not_by_dict_order(self):
+        """原来 tags[:5] 按词表书写顺序截断——留下哪几个纯看谁写在前面。"""
+        body = ("支教支教支教课程课程儿童儿童讲课，"  # 教育命中很多次
+                "同时也提供一点服务。")            # 公益志愿只命中一次
+        tags = _extract_themes("暑期支队招募", body)
+        self.assertEqual(tags[0], "教育")
+
+    def test_at_most_five_tags(self):
+        body = "乡村振兴 支教 人工智能 生态环保 志愿服务 非遗文化 社区治理 养老健康"
+        self.assertLessEqual(len(_extract_themes("综合实践招募", body)), 5)
 
 
 if __name__ == "__main__":

@@ -148,9 +148,13 @@ THEME_KEYWORDS = {
     # 只有"支教""课程"，认不出"讲课"说的是同一件事。
     "教育": ["教育", "支教", "学习", "课程", "儿童", "讲课", "授课", "上课", "带课", "教课"],
     "科技创新": ["科技", "人工智能", "AI", "数字化", "创新", "科普"],
-    "生态环保": ["生态", "环保", "环境", "低碳", "生物多样性"],
+    # 「绿色」是漏的：「“青年技能绿动”…成为绿色技能青年先锋」整篇讲的就是
+    # 环保，靠正文深处偶然蒙到一个"环境"才勉强命中，缩范围后直接漏了。
+    "生态环保": ["生态", "环保", "环境", "低碳", "绿色", "碳中和", "生物多样性"],
     "公益志愿": ["公益", "志愿", "服务", "助老", "帮扶"],
-    "文化传承": ["文化", "非遗", "文物", "传统", "乡土"],
+    # 「民族」「民俗」「技艺」也是漏的：「“黔心守艺”赴贵州黔东南」开篇讲
+    # 苗族侗族、"世界最大民族博物馆"，一个词都对不上，整条落到了综合实践。
+    "文化传承": ["文化", "非遗", "文物", "传统", "乡土", "民族", "民俗", "技艺"],
     "公共治理": ["治理", "社区", "公共政策", "政务", "基层"],
     "健康医疗": ["医疗", "健康", "卫生", "养老", "心理"],
 }
@@ -404,9 +408,65 @@ def _extract_title(lines: list[str], supplied: str) -> str:
     return "未命名社会实践项目"
 
 
-def _extract_themes(text: str) -> list[str]:
-    tags = [theme for theme, words in THEME_KEYWORDS.items() if any(word.lower() in text.lower() for word in words)]
-    return tags[:5] or ["综合实践"]
+# 主题只看标题 + 正文开头，不看整篇。
+#
+# 原来是拿整篇正文撞词表、命中一次即算。43 条真实数据上的后果：
+#     28 条被打了 4-5 个主题（词表总共才 8 个）
+#     「公益志愿」覆盖 42/43 = 98%，这个标签等于不存在
+#     教育、科技创新各 69%
+# 一篇校团委招新推送提一句"服务同学"就成了公益志愿，提一句"校园文化"
+# 就成了文化传承。而推荐的理由行拿它当依据，写「匹配主题偏好：文化传承」——
+# 用户问非遗，看到这行字，会以为系统真的读懂了。这不是排序不准，是**理由
+# 在撒谎**，比排序不准严重。
+#
+# 招募推送的结构是"标题 → 开头讲这是什么 → 中间讲要求和流程 → 结尾讲报名
+# 方式"，主题信息集中在开头；后半段的工作内容、往期回顾、公众号页脚才是
+# 噪声来源。标题永远算数，所以标题能表达的主题一条都不会漏——实测标题含
+# 支教/志愿/乡村/社区的 20 条，收紧后零漏标。
+#
+# 400 这个数字是量出来的，不是拍的：300 会让 8 条一个主题都没有，600 起
+# 「4 个以上主题」的又回升到 10 条。取 400 时无主题的 3 条（体育助教、
+# 宣传部招新、科创国际交流会）本来就不属于这 8 类，落到「综合实践」是对的。
+THEME_SCAN_CHARS = 400
+
+# 泛用词：出现在任何一篇校园推送里都不奇怪，单独出现一次不足以给整条定调。
+# 得在标题里（标题是作者对"这篇讲什么"的自我概括），或者在开头反复出现。
+#
+# 只缩范围不分强弱是不够的，43 条真实数据给了两边的反例：
+#   「百名硕博建功邯郸」正文里出现一次"健康"，就被定成了唯一标签 健康医疗
+#   「筑梦建行·春山在望」正文写着"中学生夏令营支教实践"，"支教"只出现一次,
+#     一刀切要求两次就把它卡掉了——而支教出现一次就足以说明问题
+# 分歧不在次数，在词本身：「支教」「非遗」「义诊」是专指词，「文化」「服务」
+# 「健康」是泛用词。不在这张表里的都按专指处理。
+#
+# 这张表跟这个项目上漂掉过的那几张不一样：那几张是同一件事维护了两份清单
+# （reextract 的 diff 字段 vs 实际字段、GENERATE_WORDS vs 材料类型检测），
+# 漂是因为冗余。这里是一张表的内部分级，没有第二份副本要同步。
+_WEAK_THEME_WORDS = frozenset({
+    "乡村", "农村", "教育", "学习", "课程", "儿童", "科技", "创新", "AI",
+    "环境", "服务", "文化", "传统", "乡土", "治理", "社区", "基层",
+    "健康", "卫生", "养老", "心理",
+})
+
+
+def _extract_themes(title: str, body: str) -> list[str]:
+    head = title.lower()
+    lead = f"{title}\n{body[:THEME_SCAN_CHARS]}".lower()
+    order = list(THEME_KEYWORDS)
+    scored = []
+    for theme, words in THEME_KEYWORDS.items():
+        hits = sum(lead.count(word.lower()) for word in words)
+        if not hits:
+            continue
+        named_in_title = any(word.lower() in head for word in words)
+        strong_hit = any(word.lower() in lead
+                         for word in words if word not in _WEAK_THEME_WORDS)
+        if named_in_title or strong_hit or hits >= 2:
+            scored.append((hits, theme))
+    # 原来是 tags[:5]，按 dict 书写顺序截断——留下哪几个纯看词表里谁写在
+    # 前面，跟这篇推送讲什么毫无关系。按命中次数排，同次数时才退回书写顺序。
+    scored.sort(key=lambda pair: (-pair[0], order.index(pair[1])))
+    return [theme for _, theme in scored[:5]] or ["综合实践"]
 
 
 # 主办单位。刻意不收「项目方」——它会命中「新创项目方案打磨」里的
@@ -844,7 +904,7 @@ def extract_project(raw_text: str, metadata: dict[str, Any] | None = None, *, to
         # 「…赴湖南新宁支教实践支队招募」写得清清楚楚是支教，而正文可能通篇
         # 讲行程和保障，一次都没出现"支教"两个字——只看正文会把它标成「综合实践」，
         # 用户说「不讲课」时就排不掉它。
-        "theme_tags": _extract_themes(f"{title}\n{cleaned}"),
+        "theme_tags": _extract_themes(title, cleaned),
         "practice_start": practice_start,
         "practice_end": practice_end,
         "schedule_segments": schedule_segments,
