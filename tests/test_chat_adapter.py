@@ -258,7 +258,9 @@ class DraftPostTests(unittest.TestCase):
         self.assertIsNotNone(result.stream_factory)
         content = result.resolve()
         self.assertIn("一起去滇西看看", content)
-        self.assertIn("发布前请逐条核对原文通知", content)
+        # 提醒挪到了正文外面的「发布前你要做的」里——正文里不再印「待定」。
+        self.assertIn("发布前你要做的", content)
+        self.assertIn("逐条核对原文通知", content)
 
     def test_model_failure_falls_back_instead_of_raising(self):
         chat_adapter.llm.is_enabled = lambda: True

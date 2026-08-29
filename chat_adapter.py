@@ -24,6 +24,7 @@ from typing import Any, Callable, Iterable
 import llm
 from database import Database
 from domain import (
+    department_affinity,
     FIELD_LABELS,
     GRADE_TERMS,
     KNOWN_DEPARTMENTS,
@@ -485,7 +486,15 @@ _BARE_YEAR_RE = re.compile(r"(?<!\d)((?:1[89]|20)\d{2})\s*年")
 
 
 def _years(text: str) -> set[str]:
-    return {m.group(1) for m in _BARE_YEAR_RE.finditer(text)}
+    """文本里的年份。ISO 日期里的年份也算。
+
+    项目卡存的是「2026-08-24」，文案写成「2026年8月24日」——同一个年份两种
+    写法。只认「2026年」的话，文案里这个合法的年份会被报成编造，而它的出处
+    就在项目卡的实践时间那一行。实测就是这么误报的。
+    """
+    found = {m.group(1) for m in _BARE_YEAR_RE.finditer(text)}
+    found |= {m.group(1) for m in _DATE_YMD_RE.finditer(text)}
+    return found
 
 
 # ── 外来文本进模型之前 ──────────────────────────────────────────────────
@@ -1855,12 +1864,25 @@ class PracticeChatAdapter:
                 1 for project in self._projects(include_expired=True)
                 if (project.get("eligibility") or {}).get(field)
             )
+            # 院系还有第二种起作用的方式：本院系/本书院自己发的项目排前面。
+            # 只讲"有没有院系限制"的话，回执会说成"这一条没起作用"，而实际上
+            # 它把未央书院的项目提到了第一位——说反了比不说更糟。
+            own = ""
+            if field == "departments":
+                mine = [item for item in shown
+                        if department_affinity(item["project"], value)]
+                if mine:
+                    own = f"库里有 {len(mine)} 个是{value}自己发的，已经排在前面；"
             if restricted:
-                rows.append(f"{label}「{value}」{carried}：库里有 {restricted} 个项目写了{label}限制，"
-                            f"不符合的已排除；其余没写，按不限处理。")
+                rows.append(f"{label}「{value}」{carried}：{own}另有 {restricted} 个项目写了"
+                            f"{label}限制，不符合的已排除；其余没写，按不限处理。")
+            elif own:
+                rows.append(f"{label}「{value}」{carried}：{own}"
+                            f"其余通知都没写{label}限制，按不限处理。")
             else:
                 rows.append(f"{label}「{value}」{carried}：库里的通知**都没写{label}限制**，"
-                            f"所以这一条没能筛掉任何东西，报名前请自行确认。")
+                            f"也没有{value}自己发的项目，所以这一条没能筛掉任何东西，"
+                            "报名前请自行确认。")
 
         if profile.get("reimbursement_preference") != "not_important" and shown:
             with_money = sum(
@@ -2510,14 +2532,21 @@ class PracticeChatAdapter:
         "2. **不许自己造场景。** 不要写「群山之间」「站在讲台上」「一双双好奇的眼睛」"
         "这类画面——你没去过那里，也没有任何材料支持。不要编课程内容、往届成果、"
         "带队老师、报名人数、获奖情况。原文里讲了什么故事，你就用什么故事。\n"
-        "3. 标着「待确认」的字段，在文中写成待定并提示以原文通知为准，"
-        "绝对不要为了通顺而编一个具体值。\n"
-        "4. **不要把内部字段名写进文案。** 「主题标签」「待确认字段」这些是我们的"
-        "数据结构，不是推送内容。\n"
+        "3. **不知道的字段就不要写这一行。** 直接省略，当它不存在。\n"
+        "   绝对不要写「参与资格：待定，请以原文通知为准」「报名截止：待定」——\n"
+        "   这是一篇要发出去给同学看的推文，不是内部核对表。真实的公众号推送里\n"
+        "   不会出现「待定」两个字；缺什么由我在稿子外面另行提醒作者补，不占正文。\n"
+        "   同理也不要编一个具体值来填空。\n"
+        "4. **不要把内部字段名或内部说法写进文案。** 「主题标签」「待确认字段」"
+        "「以原文通知为准」「项目事实」这些是我们的数据结构和内部口径，不是推送内容。\n"
         "5. 面向清华在校生。宁可朴素具体，也不要空泛抒情——"
         "「微光虽小，聚在一起就能照亮一段路」这种句子不要写。\n\n"
-        "输出结构：一个标题（15 字以内）、一段从原文里提炼的引入、项目要点"
-        "（时间/地点/资格/报名方式/截止）、结尾的号召。用 Markdown，总长 400-700 字。"
+        "**这是一篇公众号推文，不是招募启事。** 主体是能读下去的文字：这个项目在做"
+        "什么、为什么值得去、去了会经历什么（都以原文为据）。报名信息集中放在结尾"
+        "一小块，只列你**确实知道**的那几项。不要把整篇写成「时间/地点/资格/报名"
+        "方式/截止」的字段清单——那是通知，不是推送。\n\n"
+        "输出结构：一个标题（15 字以内）；正文若干段，从原文里提炼；结尾一小块"
+        "报名信息 + 一句号召。用 Markdown，总长 400-700 字。"
     )
 
     def _draft_post(self, messages: list[dict[str, Any]], all_user_text: str, latest: str) -> ChatResult:
@@ -2548,7 +2577,12 @@ class PracticeChatAdapter:
 
         # 故意不用 H1：模型会自己写一个标题，两个 H1 叠在一起很难看。
         # 这一行只是标明这是草稿、绑定到哪个项目。
-        header = f"> 为「{project['title']}」起草的推送文案，项目事实来自已核验的项目卡。\n\n"
+        #
+        # 不再写「项目事实来自已核验的项目卡」。这句话跟正文里一连串「待定」
+        # 摆在一起是自相矛盾的，用户当场就问了"说是已核验，怎么一堆没核实"。
+        # published 的含义是"这条通知本身核过、可以报名"，不是"每个字段都齐全"
+        # ——原文没写的东西，核验再多遍也变不出来。措辞得对得上实际。
+        header = f"> 为「{project['title']}」起草的推送文案。事实以该项目的原文通知为准。\n\n"
         # 把原文一起给模型。只给十来条抽取字段、却要求写 400–700 字，等于逼它编。
         # 上限 4000 字是为了控制单次请求的体量；招募通知本身通常就在这个量级内，
         # 真超了的话开头那部分（背景、理念、团队介绍）正是写文案最用得上的。
@@ -2588,13 +2622,39 @@ class PracticeChatAdapter:
             # 文案里引用原文的日期和年份会被全部误报。
             yield fabrication_warning("".join(written), f"{facts}\n{source}",
                                       where="原文和项目卡")
-            yield (
-                "\n\n---\n"
-                "> 以上文案由模型基于已核验的项目卡生成，发布前请逐条核对原文通知；"
-                "带「待确认」的字段务必自行补全。"
-            )
+            # 缺的字段从正文里挪到这里。原来是让模型在文中写「参与资格：待定，
+            # 请以原文通知为准」——那是内部核对表的写法，印在一篇要发出去的
+            # 推文里很荒唐，真实公众号推送不会出现「待定」两个字。
+            # 稿子里只留有依据的，缺什么在稿子外面给作者一张能直接照着补的单子。
+            yield self._post_todo(project)
 
         return ChatResult("", "draft_post", project["id"], stream_factory=produce)
+
+    # 推文里真正该出现的报名信息就这几项，多了就变成通知了。
+    _POST_ESSENTIALS = ("signup_deadline", "practice_dates", "location",
+                        "signup_method", "eligibility")
+
+    def _post_todo(self, project: dict[str, Any]) -> str:
+        """稿子发布前作者要自己补的东西，列在正文外面。
+
+        跟正文里写「待定」的区别不只是位置：这份单子是写给**作者**的，
+        可以直白说「原文没写，去问主办方」；正文是写给**读者**的，
+        读者不需要知道我们的字段哪个没抽到。
+        """
+        missing = [FIELD_LABELS.get(field, field)
+                   for field in self._POST_ESSENTIALS
+                   if field in (project.get("uncertain_fields") or [])]
+        rows = ["\n\n---\n", "**发布前你要做的**\n"]
+        if missing:
+            rows.append(
+                f"- 原文通知里没写明这几项，稿子里就没写：**{'、'.join(missing)}**。"
+                "确认之后补进结尾的报名信息块。\n")
+        rows.append("- 逐条核对原文通知——时间、地点、报名方式，这几样出错影响最大。\n")
+        if project.get("source_url"):
+            rows.append(f"- 原文：<{project['source_url']}>\n")
+        rows.append("\n> 正文只写了在原文里找得到出处的内容；没有依据的地方我留白，"
+                    "没有替你编。\n")
+        return "".join(rows)
 
     @staticmethod
     def _project_facts_block(project: dict[str, Any]) -> str:

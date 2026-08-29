@@ -120,7 +120,65 @@ KNOWN_DEPARTMENTS = [
     "航院", "工程物理系", "化工系", "材料学院", "数学系", "物理系", "化学系", "生命学院",
     "医学院", "经管学院", "公管学院", "人文学院", "社科学院", "法学院", "新闻学院",
     "美术学院", "新雅书院", "致理书院", "日新书院", "未央书院", "探微书院", "行健书院",
+    "求真书院", "笃实书院",
 ]
+
+# 书院的专名部分。标题里写「未央实践丨…」「新雅"一事"计划」时不会带"书院"两个字。
+#
+# 只对书院做简称，院系不做：「机械」「物理」「数学」「材料」既是院系简称也是
+# 普通学科词，缩进去会把一堆无关项目算成本院系办的。书院名是专有名词，
+# 单独出现基本不会有别的意思。
+COLLEGE_SHORT_NAMES = {
+    "新雅书院": "新雅", "致理书院": "致理", "日新书院": "日新", "未央书院": "未央",
+    "探微书院": "探微", "行健书院": "行健", "求真书院": "求真", "笃实书院": "笃实",
+}
+
+
+def department_affinity(project: dict[str, Any], department: str) -> str:
+    """这个项目是不是这个院系/书院自己办的；是就返回命中的那个写法。
+
+    为什么需要这条：73 条真实项目里，只有 3 条在原文里写明了院系限制。
+    也就是说院系当硬过滤基本等于没有——实测未央、新雅、机械、美术四个院系
+    问同一句「推荐几个暑期实践」，前三名一模一样，学生说自己是哪个院系
+    完全不影响结果。
+
+    但有 9 条项目的标题或公众号号名里明写着院系/书院：
+
+        未央实践丨"智汇北票"赴北票实践支队补招募
+        实践招募 | 机械系"宝庆微光"赴湖南新宁支教实践支队
+        实践招募丨新雅"一事"计划 基层助力—孝昌乡村振兴项目
+
+    这些信息一直没被用上。本院系办的活动，本院系的学生更该先看到——这不是
+    硬条件（别的院系通常也能报），是排序信号。
+    """
+    if not department or not _is_practice_like(project):
+        return ""
+    blob = " ".join(str(project.get(field) or "") for field in
+                    ("title", "organizer", "source_account", "summary"))
+    if department in blob:
+        return department
+    short = COLLEGE_SHORT_NAMES.get(department, "")
+    return short if short and short in blob else ""
+
+
+# 「本院系办的」只在项目本身是实践/志愿时才算加分项。
+#
+# 第一版没有这个前提，实测当场退化：计算机系的学生问「推荐几个暑期实践」，
+# 前三名变成「学生节征名」「男篮招新」「中长跑队招新」——因为酒井资讯是
+# 计算机系的号，这些全被判成"本院系发的"。他要的是实践，拿到的是体育队招新。
+#
+# 「本院系」应该是同类之中优先，而不是把不同类的顶上来。库里混进大量
+# 非实践内容（体育队、学生节、舞会主持、部门招新）是采集范围的另一个问题，
+# 但不能因为根因在别处就放任这里的退化。
+_PRACTICE_LIKE_WORDS = ("实践", "志愿", "支教", "调研", "公益", "服务", "支队")
+
+
+def _is_practice_like(project: dict[str, Any]) -> bool:
+    # 只看标题和摘要，不看 theme_tags。主题标签本身就宽（「公益志愿」曾经
+    # 覆盖 42/43），拿它放行的话「未央书院学生组织补招新」这种部门招新
+    # 也会被当成实践，照样挤掉真正的实践项目。
+    blob = f"{project.get('title', '')} {project.get('summary', '')}"
+    return any(word in blob for word in _PRACTICE_LIKE_WORDS)
 
 # 抽取器内部用英文字段名，但「待确认字段」是要直接给学生看的——
 # 甩一串 eligibility、reimbursement 没人看得懂。
@@ -1096,6 +1154,22 @@ def score_project(project: dict[str, Any], profile: dict[str, Any], *, today: da
     score += confidence * 15
     if confidence >= 0.85:
         reasons.append("项目信息较完整，关键字段有较高置信度")
+
+    # 本院系/本书院自己办的活动，本院系学生排前面。见 department_affinity：
+    # 院系当硬过滤几乎不起作用（73 条里只有 3 条写明了限制），但标题里的
+    # 院系名一直摆在那儿没人用。
+    #
+    # 权重 20：比主题（25）低，比地点（15）高——「我们书院自己的实践」
+    # 对学生的吸引力就在这两者之间。
+    #
+    # 关键前提是 department_affinity 里那道 _is_practice_like：没有它的时候，
+    # 计算机系学生问「推荐几个暑期实践」，前三名是「学生节征名」「男篮招新」
+    # 「中长跑队招新」——酒井资讯是计算机系的号，这些全被判成"本院系发的"。
+    # 「本院系」应该是同类之中优先，不是把不同类的顶上来。
+    affinity = department_affinity(project, str(profile.get("department", "")).strip())
+    if affinity:
+        score += 20
+        reasons.append(f"{affinity}自己发布的项目")
 
     uncertain = project.get("uncertain_fields", [])
     score -= min(15, len(uncertain) * 3)
