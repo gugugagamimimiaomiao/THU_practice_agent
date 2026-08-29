@@ -161,6 +161,49 @@ class FalseFallbackTests(unittest.TestCase):
                 self.assertTrue(provinces)
 
 
+class SelfConsistencyTests(unittest.TestCase):
+    """P1-8 / P2-9：同一条回复里前后打架，以及答非所问。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tempdir = tempfile.TemporaryDirectory()
+        cls.database = Database(Path(cls.tempdir.name) / "chat.db")
+        import_article_text(
+            cls.database,
+            {"title": "赴湖南新宁支教实践支队招募", "source_account": "清华大学社会实践",
+             "source_url": "https://mp.weixin.qq.com/s/sc1"},
+            "现面向全校招募队员。\n报名截止：2036年9月10日\n参与资格：全校本科生\n报名方式：扫码\n",
+        )
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tempdir.cleanup()
+
+    def setUp(self):
+        chat_adapter.llm.is_enabled = lambda: False
+        self.adapter = PracticeChatAdapter(self.database)
+
+    def test_exclusion_reasons_are_the_real_ones(self):
+        """原来无论如何都写「因资格或经费不符被排除」，于是出现过：
+        上面刚说「没读到明确条件」，下面就说「37 个因资格或经费不符被排除」
+        ——用户没给条件，哪来的不符。"""
+        content = self.adapter.reply([
+            {"role": "user", "content": "推荐实践"},
+            {"role": "assistant", "content": "## 正式推荐\n\n1. **赴湖南新宁支教实践支队招募**\n"},
+            {"role": "user", "content": "你为什么这么推荐"},
+        ]).content
+        if "没读到明确条件" in content:
+            self.assertNotIn("资格或经费不符", content,
+                             f"说了没读到条件，又说因条件不符被排除：\n{content}")
+
+    def test_update_frequency_is_actually_answered(self):
+        """实测问「多久更新一次」，整段讲数据来源，通篇没回答频率。"""
+        content = self.adapter.reply([{"role": "user", "content": "多久更新一次"}]).content
+        self.assertIn("多久更新一次", content)
+        self.assertIn("没有固定周期", content,
+                      "既没给周期也没说没有周期——这是在绕开问题")
+
+
 class OrdinalNeverFuzzyTests(unittest.TestCase):
     """P0-2：「第二个」被拿去模糊匹配标题里的「第二批」。
 

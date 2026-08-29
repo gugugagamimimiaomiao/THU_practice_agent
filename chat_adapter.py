@@ -12,6 +12,7 @@ import json
 import os
 import re
 import threading
+from collections import Counter
 import time
 import uuid
 from dataclasses import dataclass
@@ -1405,10 +1406,20 @@ class PracticeChatAdapter:
         lines.append("- 来源公众号的可靠度、字段置信度：各占一部分")
         lines.append("- 原文缺字段：每缺一项 -3，最多扣 15")
 
+        # 排除原因要照实说。原来无论如何都写「被硬条件排除（截止、时间冲突、
+        # 资格或经费不符）」，于是出现过前后打架：上面刚说「没读到明确条件」，
+        # 下面就说「37 个因资格或经费不符被排除」——用户没给条件，哪来的不符。
+        # 真实原因就在每条的 excluded_reasons 里，统计一下即可。
+        reason_counts: Counter[str] = Counter()
+        for item in result["excluded"]:
+            for reason in item.get("excluded_reasons", []):
+                reason_counts[reason] += 1
+        why = "；".join(f"{reason} {count} 个" for reason, count in reason_counts.most_common(4))
         lines.append(
             f"\n本次共 {len(result['eligible'])} 个进正式推荐、"
             f"{len(result['potential'])} 个待核验、"
-            f"{len(result['excluded'])} 个被硬条件排除（截止、时间冲突、资格或经费不符）。"
+            f"{len(result['excluded'])} 个被排除"
+            + (f"（{why}）。" if why else "。")
         )
         lines.append(
             "\n> 这个分数是**针对你这次的提问**算的，不是项目本身的评分。"
@@ -2191,11 +2202,15 @@ class PracticeChatAdapter:
         with_link = [p for p in projects if p.get("source_url")]
         demo = [p for p in projects if p.get("demo_data")]
 
-        latest_import = ""
-        for item in self.db.recent_activity(limit=20):
-            if item.get("event_type") in {"ingest", "seed", "collector"}:
-                latest_import = item.get("created_at", "")[:16].replace("T", " ")
-                break
+        # 「多久更新一次」是这类问题里最常问的一句，而原来的回答通篇没有回答它。
+        # 又不能编一个「每天更新」——更新取决于采集方什么时候推数据，没有固定周期。
+        # 所以把最近几次实际入库时间摆出来，让用户自己看节奏。
+        imports = [
+            item.get("created_at", "")[:16].replace("T", " ")
+            for item in self.db.recent_activity(limit=60)
+            if item.get("event_type") in {"ingest", "seed", "collector"}
+        ]
+        latest_import = imports[0] if imports else ""
 
         lines = [
             "我不猜，只转述已经存进项目库的内容，每个关键字段都留了原文引用。",
@@ -2215,6 +2230,17 @@ class PracticeChatAdapter:
             lines.append(f"- 最近一次入库：{latest_import}")
         if demo:
             lines.append(f"- 其中 {len(demo)} 条是演示数据，会明确标注，不能作为真实报名依据")
+        lines += ["", "**多久更新一次**"]
+        if len(imports) >= 2:
+            recent = "、".join(list(dict.fromkeys(day[:10] for day in imports))[:5])
+            lines.append(
+                f"- **没有固定周期**。更新取决于采集方什么时候把新推送推过来，"
+                f"我不替它承诺频率。最近几次入库发生在：{recent}"
+            )
+        else:
+            lines.append("- **没有固定周期**，取决于采集方什么时候推数据。目前入库记录还很少。")
+        lines.append("- 所以「最近有没有新项目」这个问题，看上面那个入库日期最准；"
+                     "隔得久了就说明还没有新的推过来，不是我漏了。")
 
         lines += [
             "",
