@@ -1138,7 +1138,9 @@ class PracticeChatAdapter:
         就把它从排除表里拿掉——那是用户改主意了。
         """
         merged = self._extract_profile("")
-        for text in user_messages:
+        for raw in user_messages:
+            # 用户打出来的项目名是指称不是条件，先摘掉再抽。见 _strip_project_names。
+            text = self._strip_project_names(raw)
             turn = self._extract_profile(text)
             for field in ("department", "grade", "themes", "preferred_locations",
                           "location_labels", "available_start", "available_end",
@@ -2241,6 +2243,34 @@ class PracticeChatAdapter:
             return True
         project = self._resolve_project([], text, latest_only=True, loose=True)
         return bool(project and _distinctive_overlap(project["title"], text))
+
+    def _strip_project_names(self, text: str) -> str:
+        """把用户打出来的项目名从这句话里摘掉，剩下的才是他对自己的描述。
+
+        项目名是**指称**，不是**条件**。「研究生支教团 还能报吗」里的
+        「研究生」是这个项目对参与者的要求，不是提问者的年级；可是抽条件时
+        整句话一起进 _extract_profile，年级就被抽成了「研究生」。更糟的是
+        条件会跨轮沿用——只要点开过一次这个项目，后面每一次筛选都被它压着，
+        而且回复里从不提这条来自哪，用户根本看不出来。
+
+        「赴湖南新宁支教实践支队 怎么报名」同理：湖南是那个项目在哪，
+        不是用户想去哪。
+
+        只在这句话确实唯一指到一个项目时才摘，判据沿用 _names_a_project
+        那一套（完整标题、或标题里足以区分的专名片段）；「我想找乡村振兴
+        主题的实践」这种只撞上通用主题词的，_distinctive_overlap 会返回空，
+        原样放行。
+        """
+        if not text:
+            return text
+        project = self._resolve_project([], text, latest_only=True, loose=True)
+        if not project:
+            return text
+        title = str(project.get("title") or "")
+        for span in (title, str(project.get("id") or ""), _distinctive_overlap(title, text)):
+            if span and span in text:
+                return text.replace(span, " ")
+        return text
 
     def _provenance(self) -> str:
         """回答"这些信息准吗 / 你怎么知道的 / 数据什么时候更新的"。
