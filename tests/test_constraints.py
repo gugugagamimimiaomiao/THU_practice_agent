@@ -177,5 +177,48 @@ class ConstraintTests(unittest.TestCase):
             self.assertNotIn(promise, content, f"空结果却承诺了「{promise}」：\n{content}")
 
 
+class CarriedOverConditionTests(unittest.TestCase):
+    """条件沿用是对的，但得说清楚它是沿用的。
+
+    浏览器复测时撞上的：这一轮只说了地域和主题，回执却写「你说了 2026-09-01
+    到 2026-09-30 有空」——那是几轮前说的。第一反应是"它在胡说"。我是最熟
+    这套逻辑的人尚且如此，学生只会更困惑。条件本身没错，错的是措辞让人
+    以为是刚说的；说清楚是沿用的，他才知道那条还挂着、可以撤。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tempdir = tempfile.TemporaryDirectory()
+        cls.database = Database(Path(cls.tempdir.name) / "chat.db")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tempdir.cleanup()
+
+    def setUp(self):
+        chat_adapter.llm.is_enabled = lambda: False
+        self.adapter = PracticeChatAdapter(self.database)
+
+    def reply(self, *texts):
+        return self.adapter.reply([{"role": "user", "content": t} for t in texts])
+
+    def test_conditions_stated_this_turn_read_as_just_said(self):
+        content = self.reply("我大二，九月有空，想找北京的实践").content
+        self.assertIn("你说了 2026-09-01", content)
+        self.assertNotIn("你之前说过 2026-09-01", content)
+        self.assertNotIn("还生效着", content)
+
+    def test_conditions_carried_from_an_earlier_turn_say_so(self):
+        content = self.reply("我大二，九月有空", "想找北京的实践").content
+        self.assertIn("你之前说过 2026-09-01", content)
+        self.assertIn("年级「大二」（前面几轮说的，还生效着）", content)
+
+    def test_the_condition_itself_still_applies(self):
+        """措辞变了，条件不能跟着失效。"""
+        content = self.reply("我大二，九月有空", "想找北京的实践").content
+        self.assertIn("2026-09-01", content)
+        self.assertIn("大二", content)
+
+
 if __name__ == "__main__":
     unittest.main()

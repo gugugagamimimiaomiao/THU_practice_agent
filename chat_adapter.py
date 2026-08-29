@@ -1304,10 +1304,21 @@ class PracticeChatAdapter:
         就把它从排除表里拿掉——那是用户改主意了。
         """
         merged = self._extract_profile("")
-        for raw in user_messages:
+        # 哪些条件是这一轮说的、哪些是前面几轮沿用下来的。
+        #
+        # 回执里原来一律写「你说了 2026-09-01 到 2026-09-30 有空」。用户这一轮
+        # 只说了地域和主题，看到这句话第一反应是"它在胡说"——我自己在浏览器里
+        # 复测时就是这个反应，而我是最熟这套逻辑的人。条件沿用本身是对的
+        # （用户几轮前说过九月，后面就该一直生效），错的是措辞让人以为是刚说的。
+        this_turn: set[str] = set()
+        for index, raw in enumerate(user_messages):
             # 用户打出来的项目名是指称不是条件，先摘掉再抽。见 _strip_project_names。
             text = self._strip_project_names(raw)
             turn = self._extract_profile(text)
+            last = index == len(user_messages) - 1
+            if last:
+                this_turn = {name for name in turn if turn[name] not in ("", [], 0, False,
+                                                                        "not_important")}
             for field in ("department", "grade", "themes", "preferred_locations",
                           "location_labels", "available_start", "available_end",
                           "wanted_count"):
@@ -1328,7 +1339,30 @@ class PracticeChatAdapter:
             merged["excluded_themes"] = [
                 item for item in merged["excluded_themes"] if item not in merged["themes"]
             ]
+        merged["said_this_turn"] = this_turn
         return merged
+
+    @staticmethod
+    def _said(profile: dict[str, Any], *fields: str) -> str:
+        """回执的开头：这一轮说的用「你说了」，前面几轮沿用的用「你之前说过」。
+
+        差别看着小，但决定用户会不会以为我在胡说——他这一轮只说了地域，
+        回执却写「你说了 9 月 1 日到 9 月 30 日有空」，第一反应必然是幻觉。
+        写清楚是沿用的，他才知道那条还挂着、可以撤。
+        """
+        fresh = profile.get("said_this_turn")
+        if fresh is None or any(name in fresh for name in fields):
+            return "你说了"
+        return "你之前说过"
+
+    @staticmethod
+    def _carried(profile: dict[str, Any], *fields: str) -> str:
+        """同一件事的后缀写法，给「主题「教育」」「年级「大二」」这种放句首
+        不通顺的条目用。"""
+        fresh = profile.get("said_this_turn")
+        if fresh is None or any(name in fresh for name in fields):
+            return ""
+        return "（前面几轮说的，还生效着）"
 
     def _extract_profile(self, text: str) -> dict[str, Any]:
         profile: dict[str, Any] = {
@@ -1664,15 +1698,17 @@ class PracticeChatAdapter:
                                     ("院系", profile.get("department"), "departments")):
             if not value:
                 continue
+            # field 是项目侧的字段名（grades / departments），profile 侧是单数。
+            carried = self._carried(profile, field.rstrip("s"))
             restricted = sum(
                 1 for project in self._projects(include_expired=True)
                 if (project.get("eligibility") or {}).get(field)
             )
             if restricted:
-                rows.append(f"{label}「{value}」：库里有 {restricted} 个项目写了{label}限制，"
+                rows.append(f"{label}「{value}」{carried}：库里有 {restricted} 个项目写了{label}限制，"
                             f"不符合的已排除；其余没写，按不限处理。")
             else:
-                rows.append(f"{label}「{value}」：库里的通知**都没写{label}限制**，"
+                rows.append(f"{label}「{value}」{carried}：库里的通知**都没写{label}限制**，"
                             f"所以这一条没能筛掉任何东西，报名前请自行确认。")
 
         if profile.get("reimbursement_preference") != "not_important" and shown:
@@ -1749,7 +1785,8 @@ class PracticeChatAdapter:
                       if not (item["project"].get("practice_start")
                               and item["project"].get("practice_end")))
         checked = len(shown) - unknown
-        note = f"你说了 {start} 到 {end} 有空："
+        said = PracticeChatAdapter._said(profile, "available_start", "available_end")
+        note = f"{said} {start} 到 {end} 有空："
         if unknown and checked:
             note += f"上面 {checked} 条的日期我核过、不冲突；另外 {unknown} 条原文没写实践时间，冲不冲突判断不了。"
         elif unknown:
@@ -1775,8 +1812,9 @@ class PracticeChatAdapter:
         said = "、".join(
             f"「{theme}」（{'、'.join(THEME_KEYWORDS[theme][:3])}都算这一类）"
             for theme in wanted)
+        carried = self._carried(profile, "themes")
         if shown_hits:
-            note = f"主题{said}：上面 {shown_hits} 条对得上，已经排在前面。"
+            note = f"主题{said}{carried}：上面 {shown_hits} 条对得上，已经排在前面。"
             if len(shown) > shown_hits:
                 note += (f"其余 {len(shown) - shown_hits} 条**主题对不上**，"
                          "是按时间和信息完整度补的。")
@@ -1787,10 +1825,10 @@ class PracticeChatAdapter:
             # 按标题查详情这条路本来就通，不用新造意图。
             names = "、".join(f"**{project['title']}**" for project in elsewhere[:4])
             more = f"，等 {len(elsewhere)} 个" if len(elsewhere) > 4 else ""
-            return (f"主题{said}：**下面几条主题都对不上**。库里主题对得上的是"
+            return (f"主题{said}{carried}：**下面几条主题都对不上**。库里主题对得上的是"
                     f"{names}{more}，但都没能进正式推荐——已经截止，或者关键字段"
                     "还没核对完。想看其中哪一条，说出标题里能区分的几个字。")
-        return (f"主题{said}：**库里目前一条都没有**。下面几条主题对不上，"
+        return (f"主题{said}{carried}：**库里目前一条都没有**。下面几条主题对不上，"
                 "只是满足了其它条件——想换个方向直接说。")
 
     def _theme_gap(self, profile: dict[str, Any],
@@ -1837,17 +1875,17 @@ class PracticeChatAdapter:
         filler = max(0, min(len(result.get("eligible", [])), self._show_count(profile)) - in_list)
 
         if in_list:
-            note = f"你提到了{said}：库里符合的有 {in_list} 个，已经排在最前面。"
+            note = f"{self._said(profile, 'location_labels', 'preferred_locations')}{said}：库里符合的有 {in_list} 个，已经排在最前面。"
             if filler:
                 note += "排在后面的不在这个范围内，是按时间和主题补上的。"
         elif anywhere:
             note = (
-                f"你提到了{said}：这个范围内有 {anywhere} 个项目，但都没能进正式推荐"
+                f"{self._said(profile, 'location_labels', 'preferred_locations')}{said}：这个范围内有 {anywhere} 个项目，但都没能进正式推荐"
                 "（已截止，或关键字段还没核对完）。"
             )
             note += "下面几条**不在**你要的范围里。" if filler else ""
         else:
-            note = f"你提到了{said}：**库里目前一个都没有**。"
+            note = f"{self._said(profile, 'location_labels', 'preferred_locations')}{said}：**库里目前一个都没有**。"
             if filler:
                 note += "下面几条不在这个范围内，只满足其它条件。"
 
