@@ -1523,6 +1523,9 @@ class PracticeChatAdapter:
         location = self._location_note(profile, result)
         if location:
             rows.append(location)
+        theme_note = self._theme_note(profile, result)
+        if theme_note:
+            rows.append(theme_note)
         time_note = self._time_note(profile, result)
         if time_note:
             rows.append(time_note)
@@ -1578,6 +1581,10 @@ class PracticeChatAdapter:
         steps.append("「写访谈提纲」「写外联话术」「写调研报告框架」「写推送文案」")
         if result.get("location_asked") and not result.get("location_matched"):
             steps.append("「不限地点再看看」")
+        # 主题一条都没对上时，得给条出路。原来只有地域有这一条，
+        # 于是「有没有非遗方向的」拿到五条不沾边的项目，连怎么退回去都不知道。
+        if self._theme_note(profile, result).endswith("想换个方向直接说。"):
+            steps.append("「不限主题再看看」")
         if result.get("potential"):
             steps.append(f"「看看那 {len(result['potential'])} 条线索」")
         steps.append("「你为什么这么推荐」")
@@ -1621,6 +1628,41 @@ class PracticeChatAdapter:
         else:
             note += "上面几条的日期我都核过，跟你的时间不冲突。"
         return note
+
+    def _theme_note(self, profile: dict[str, Any], result: dict[str, Any]) -> str:
+        """说清楚主题偏好到底满足没满足。没提主题就返回空串。
+
+        地域早就有这一段，主题一直没有。实测：问「有没有非遗方向的实践」，
+        五条里没有一条沾边，而整段回复**一个字都不提主题**——用户只会
+        以为这五条就是非遗方向的。跟地域那个病一模一样，只是换了个字段。
+
+        顺带把我的归类摊开给用户看：他说「非遗」，我归到「文化传承」这一类。
+        归错了他能当场纠正；不说的话，他连我按什么筛的都不知道。
+        """
+        wanted = [theme for theme in (profile.get("themes") or []) if theme in THEME_KEYWORDS]
+        if not wanted:
+            return ""
+        chosen = set(wanted)
+        shown = result.get("eligible", [])[:self._show_count(profile)]
+        hit_shown = sum(1 for item in shown
+                        if chosen & set(item["project"].get("theme_tags") or []))
+        hit_all = sum(1 for project in self._projects(include_expired=True)
+                      if not project.get("demo_data")
+                      and chosen & set(project.get("theme_tags") or []))
+        said = "、".join(
+            f"「{theme}」（{'、'.join(THEME_KEYWORDS[theme][:3])}都算这一类）"
+            for theme in wanted)
+        if hit_shown:
+            note = f"主题{said}：上面 {hit_shown} 条对得上，已经排在前面。"
+            if len(shown) > hit_shown:
+                note += (f"其余 {len(shown) - hit_shown} 条**主题对不上**，"
+                         "是按时间和信息完整度补的。")
+            return note
+        if hit_all:
+            return (f"主题{said}：库里有 {hit_all} 个，但都没能进正式推荐"
+                    "（已截止，或关键字段还没核对完）。**下面几条主题都对不上。**")
+        return (f"主题{said}：**库里目前一条都没有。**下面几条主题对不上，"
+                "只是满足了其它条件——想换个方向直接说。")
 
     def _location_note(self, profile: dict[str, Any], result: dict[str, Any]) -> str:
         """说清楚地域偏好到底满足没满足。没有偏好就返回空串。

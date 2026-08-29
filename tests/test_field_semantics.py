@@ -176,6 +176,21 @@ class ThemeTaggingTests(unittest.TestCase):
         body = "为落实团河北省委关于人才工作的要求，面向京津冀高校公开选拔硕博，服务地方发展，关心青年健康成长。"
         self.assertNotIn("健康医疗", _extract_themes("百名硕博建功行动招募公告", body))
 
+    def test_a_word_that_only_looks_specific(self):
+        """「生态」看着专指，其实「创业生态」「产业生态」都是常见搭配。
+
+        实测：「校团委创业中心学生骨干招募」正文里的"创业生态组"让它成了
+        唯一命中生态环保的项目，于是问「有没有环保生态方向的」它排第一。
+        """
+        body = ("创业指导中心下设对外联络组、综合管理组、品牌宣传组、"
+                "创+平台组、启创计划组、赛事运营组和创业生态组7个组别。")
+        self.assertNotIn("生态环保", _extract_themes("2026年秋校团委创业中心学生骨干招募", body))
+
+    def test_unambiguous_green_words_still_count_once(self):
+        """降级「生态」不能连累「环保」「绿色」——它们没有歧义。"""
+        self.assertIn("生态环保", _extract_themes("暑期实践招募", "本次实践聚焦流域环保治理。"))
+        self.assertIn("生态环保", _extract_themes("暑期实践招募", "带你成为绿色技能青年先锋。"))
+
     def test_tags_are_ranked_by_hits_not_by_dict_order(self):
         """原来 tags[:5] 按词表书写顺序截断——留下哪几个纯看谁写在前面。"""
         body = ("支教支教支教课程课程儿童儿童讲课，"  # 教育命中很多次
