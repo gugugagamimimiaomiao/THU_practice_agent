@@ -324,7 +324,10 @@ class Handler(BaseHTTPRequestHandler):
                         note["truncated"] = truncate_to_tokens(result.content, max_tokens)[1]
                 # 没接住的问题要留下原话，否则只知道"兜底率 12%"却不知道该补什么。
                 # 只记未命中的这一类，且截断到 80 字——够看出意图，不留完整聊天记录。
-                if result.intent in {"fallback", "writing_help", "about_practice"}:
+                # 以 _blocked 结尾的是提示词泄漏拦截，属于安全事件：量很小，
+                # 但一旦有人在反复试，得能看出来。
+                if (result.intent in {"fallback", "writing_help", "about_practice"}
+                        or result.intent.endswith("_blocked")):
                     latest_user = next(
                         (m["content"] for m in reversed(messages) if m["role"] == "user" and m["content"].strip()),
                         "",
