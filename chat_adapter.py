@@ -439,6 +439,20 @@ GENERIC_WRITING_HINTS = (
 # 对已采集数据的统计性提问。这类有据可查——答案是从库里算出来的，不是编的。
 # 以前全都掉别处了：「哪些主题的实践比较多」被"比较"抢去做项目对比，
 # 「实践招募一般什么时候发布」里的"实践招募"模糊命中标题变成了项目候选列表。
+# 问的是**数字**，不是要一份清单。
+#
+# 「库里一共有多少个项目」「过期的有几个」「哪个省份最多」现在全掉兜底或者
+# 甩一份列表回去。评委随口就会问这一类，答不上来看着特别傻；而这些数字我们
+# 手上全都有，只是从来没往外说过。
+_COUNT_RE = re.compile(r"多少|几个|几条|几项|几篇|几门|数量|统计|分布|最多|占比|比例")
+# 这几种带"多少"但问的不是库里有几条：「招多少人」是某个项目的名额，
+# 「多少钱」是经费，「多少天」是时长。
+_NOT_A_COUNT_RE = re.compile(r"多少人|几个人|几人|名额|招多少|多少钱|多少天|多少小时|工时")
+# 「推荐几个实践」「给我几个支教的」是**索取**，不是在问数量。区别在句式：
+# 数量词前面挂着动词就是要东西，光秃秃的「有几个」才是问数。
+# 实测这条不加，「推荐几个实践」会被计数分支抢走，用户要列表却得到一个数字。
+_ASK_FOR_SOME_RE = re.compile(r"(推荐|给我|来|找|列出?|要|看看)\s*(几|[一二两三四五六七八九十]|\d+)\s*[个条项份]")
+
 CORPUS_STATS_HINTS = (
     "一般去", "都去哪", "去哪些地方", "哪些地方", "地点分布",
     "一般多长", "多长时间", "一般几天", "持续多久",
@@ -995,6 +1009,22 @@ DETAIL_WORDS = ("详情", "介绍", "资格", "截止", "报销", "地点", "时
 # 「看看那 22 条线索」「线索都有哪些」——要看的是待核验那一堆，不是正式推荐。
 _LEADS_RE = re.compile(r"线索|待核验|没核实|未核实|待复核|复核队列")
 
+# 撤掉某一类条件。左边是 profile 里要清空的字段，右边是怎么说算撤。
+_RELAXABLE: tuple[tuple[tuple[str, ...], re.Pattern[str]], ...] = (
+    (("preferred_locations", "location_labels", "excluded_locations",
+      "excluded_location_labels"),
+     re.compile(r"不限(地点|地区|地域|城市|省份)|放宽(地点|地区|地域)|"
+                r"(地点|地区|地域)(不限|放宽|去掉|别管|不用管)|哪里都(行|可以)")),
+    (("themes", "excluded_themes"),
+     re.compile(r"不限(主题|方向|类型|领域)|放宽(主题|方向)|"
+                r"(主题|方向)(不限|放宽|去掉|别管|不用管)|什么(主题|方向)都(行|可以)")),
+    (("available_start", "available_end"),
+     re.compile(r"不限(时间|日期|档期)|放宽(时间|日期)|"
+                r"(时间|日期)(不限|放宽|去掉|别管|不用管)|什么时候都(行|可以)")),
+    (("grade",), re.compile(r"不限年级|年级(不限|别管|不用管)")),
+    (("department",), re.compile(r"不限(院系|专业|书院)|(院系|专业|书院)(不限|别管|不用管)")),
+)
+
 LIST_WORDS = (
     "项目列表", "全部项目", "近期项目", "实践机会", "有哪些", "还有哪些",
     "快截止", "最近截止", "都有什么",
@@ -1214,6 +1244,16 @@ class PracticeChatAdapter:
             return self._generate(messages, all_user_text, latest)
         if _COMPARE_RE.search(latest):
             return self._compare(messages, all_user_text)
+        # 线索排在计数之前：「看看那几条线索」里的「几条」会被计数正则抢走，
+        # 而 list_leads 的标题本来就写着「共 N 条」，那一问已经答了。
+        if _LEADS_RE.search(latest):
+            return ChatResult(self._list_leads(), "list_leads")
+        # 问数字就给数字。必须排在 RECOMMEND_WORDS / FILTER_WORDS 之前：
+        # 「现在还能报名的有几个」里的「报名」、「有经费支持的有几个」里的
+        # 「经费」都会先被推荐分支接走，然后甩一份列表回去——而用户要的是
+        # 一个数。_ASK_FOR_N_RE 也会把「有几个」读成「给我几个」。
+        if self._is_count_question(latest):
+            return self._count_answer(user_messages)
         if any(word in latest for word in RECOMMEND_WORDS) or _ASK_FOR_N_RE.search(latest):
             return self._recommend(user_messages)
         # 条件筛选：「有没有校内的志愿服务」「只看志愿服务」。必须排在项目匹配
@@ -1230,8 +1270,6 @@ class PracticeChatAdapter:
         # 一直没有对应的分支——落到 LIST_WORDS 里的「看看」，结果先甩一屏
         # 正式推荐，用户要的线索被埋在底下。_next_steps 的注释里写着
         # 「提一件做不到的事比不提更糟」，这就是自己犯了那一条。
-        if _LEADS_RE.search(latest):
-            return ChatResult(self._list_leads(), "list_leads")
         if any(word in latest for word in LIST_WORDS):
             return ChatResult(self._list_projects(), "list_projects")
         # 只说了项目名（没带其它意图词）时，直接给项目卡而不是兜底菜单——
@@ -1518,6 +1556,23 @@ class PracticeChatAdapter:
                 item for item in merged["excluded_themes"] if item not in merged["themes"]
             ]
         merged["said_this_turn"] = this_turn
+        # 「不限地点再看看」「放宽时间」——把这一类条件撤掉。
+        #
+        # 这几句话是我们**自己在「接下来可以说」里教用户说的**，可它们一直没有
+        # 实现：用户照做，掉兜底。今天已经因为同一个毛病栽过两次（「看看那 22
+        # 条线索」没分支、「要我放宽哪一条」接不住），加提示语的时候又犯了一次。
+        #
+        # 撤条件放在这里而不是单开一个意图分支：撤完还是要重新推荐一遍，
+        # 走同一条路最省事，也不会跟"条件后来居上"的累积逻辑打架。
+        latest = user_messages[-1] if user_messages else ""
+        for fields, pattern in _RELAXABLE:
+            if pattern.search(latest):
+                for field in fields:
+                    merged[field] = [] if isinstance(merged[field], list) else ""
+                merged.setdefault("relaxed", []).append(pattern.pattern)
+        if merged.get("relaxed"):
+            merged["location_strict"] = False
+            merged["strict"] = False
         return merged
 
     @staticmethod
@@ -1733,8 +1788,33 @@ class PracticeChatAdapter:
         # 光有条件词还不够：「今天北京天气怎么样」里有「北京」，「我对教育很感
         # 兴趣」里有主题词，但它们都不是在下筛选指令。还得这句话要么落在这个
         # 领域里（提到实践/志愿/项目…），要么长得像在改条件（换成/改到/不要/只要…）。
+        # 「不限主题再看看」「地点不用管了」——撤条件也是下指令，而且这几句
+        # 是我们自己教用户说的，接不住等于提了一件做不到的事。
+        if any(pattern.search(latest) for _, pattern in _RELAXABLE):
+            return True
         if not (_DOMAIN_RE.search(latest) or _CONSTRAINT_EDIT_RE.search(latest)):
-            return False
+            # 例外：整句话本身就只是一个条件值。用户看到回执里写着
+            # 「主题「文化传承」」「你说了「京津冀」」，很可能直接把这几个字
+            # 打回来——那明显是在筛选，不该掉兜底。
+            # 限定"整句就是它"，避免「今天北京天气怎么样」被误判。
+            # 判据是"整句**就是**这个值"，不是"整句里含这个值"——
+            # 「我对教育很感兴趣」含主题词但是在聊天，不是在筛选。
+            # 把认出来的部分抠掉，剩不下东西才算。
+            stripped = re.sub(r"[的了吧呢啊吗，。！？\s]", "", latest)
+            if not stripped or len(stripped) > 10:
+                return False
+            bare = self._extract_profile(stripped)
+            residue = stripped
+            for value in (list(bare["location_labels"]) + list(bare["preferred_locations"])
+                          + [bare["grade"], bare["department"]]):
+                if value:
+                    residue = residue.replace(value, "")
+            for theme in bare["themes"]:
+                for word in [theme] + list(THEME_KEYWORDS.get(theme, ())):
+                    residue = residue.replace(word, "")
+            recognised = bool(bare["preferred_locations"] or bare["themes"]
+                              or bare["grade"] or bare["department"])
+            return recognised and not residue
         profile = self._extract_profile(latest)
         return any(profile[field] for field in (
             "preferred_locations", "excluded_locations", "themes", "excluded_themes",
@@ -1943,7 +2023,11 @@ class PracticeChatAdapter:
         if len(result.get("eligible", [])) >= 2:
             steps.append("「比较前两个」")
         steps.append("「帮我写第一个的报名理由」")
-        steps.append("「写访谈提纲」「写外联话术」「写调研报告框架」「写推送文案」")
+        # 带上序号。这四句原来写成「写访谈提纲」，可它们出现在**刚推荐完**的
+        # 位置上——那时还没选定任何项目，用户照做只会得到一句"给哪个项目写？"。
+        # 系统没做错（确实不知道给谁写），错的是提示语没说全。
+        steps.append("「写第一个的访谈提纲」「写第一个的外联话术」"
+                     "「写第一个的调研报告框架」「写第一个的推送文案」")
         if result.get("location_asked") and not result.get("location_matched"):
             steps.append("「不限地点再看看」")
         # 主题一条都没对上时，得给条出路。原来只有地域有这一条，
@@ -3606,6 +3690,141 @@ class PracticeChatAdapter:
         lines.append(
             "\n接下来可以说：「帮我写这个项目的报名理由」，或者「比较这个和另一个项目名」。"
         )
+        return "\n".join(lines)
+
+    def _is_count_question(self, latest: str) -> bool:
+        if _NOT_A_COUNT_RE.search(latest) or not _COUNT_RE.search(latest):
+            return False
+        if _ASK_FOR_SOME_RE.search(latest):
+            return False
+        # 「你收录了多少篇推送」问的是语料规模，那边有专门的回答。
+        return not any(word in latest for word in CORPUS_STATS_HINTS)
+
+    def _count_answer(self, user_messages: list[str]) -> ChatResult:
+        """问数字就给数字。
+
+        原来这一类要么掉兜底（「库里一共有多少个项目」「过期的有多少」
+        「哪个省份最多」），要么甩一份列表回去（「有经费支持的有几个」）。
+        数字我们手上全都有，只是从来没往外说过。
+
+        条件跟着用户走：他说「北京的有几个」，就按北京数；说「支教类的有多少」，
+        就按主题数。用的是同一套 profile 抽取，不另起一套。
+        """
+        latest = user_messages[-1] if user_messages else ""
+        projects = [p for p in self._projects(include_expired=True) if not p.get("demo_data")]
+        published = [p for p in projects if p.get("status") == "published"]
+        expired = [p for p in projects if p.get("status") == "expired"]
+        pending = [p for p in projects if p.get("status") == "needs_review"]
+
+        # 「哪个省份最多」「主题分布」——问的是分布，不是某一项的条数。
+        if re.search(r"省份|地区|地域|地点", latest) and re.search(r"最多|分布|占比|比例", latest):
+            return ChatResult(self._distribution(projects, "省份"), "count")
+        if re.search(r"主题|方向|类型", latest) and re.search(r"最多|分布|占比|比例", latest):
+            return ChatResult(self._distribution(projects, "主题"), "count")
+
+        # 问的是某个状态有几个。
+        for words, label, bucket in (
+            (("过期", "截止", "过了", "结束"), "已过报名截止", expired),
+            (("还能报", "在招", "可以报", "能报名", "正在", "有效"), "还能报名", published),
+            (("待核验", "没核实", "未核实", "线索"), "待核验", pending),
+        ):
+            if any(word in latest for word in words):
+                return ChatResult(
+                    f"**{len(bucket)} 个**{label}。\n\n"
+                    f"库里合计 {len(projects)} 条：还能报名 {len(published)}、"
+                    f"已过截止 {len(expired)}、待核验 {len(pending)}。",
+                    "count")
+
+        profile = self._profile_from_turns(user_messages)
+        conditions = self._restrictions_said(profile)
+        # 抽不到条件时它返回的是占位话术「你刚才说的那些条件」，那等于没条件。
+        if conditions == "你刚才说的那些条件":
+            conditions = ""
+        # _restrictions_said 里没有经费这一项，但「有经费支持的有几个」显然
+        # 是带条件的问法——不补上就会掉到下面报总账，等于没听见。
+        if profile.get("reimbursement_preference") != "not_important":
+            conditions = "；".join(filter(None, [conditions, "要有经费支持"]))
+        if conditions:
+            matched = self._really_matching(published, profile)
+            lines = [f"**{len(matched)} 个**。",
+                     "",
+                     f"按你说的条件（{conditions}）数的，只算还能报名、"
+                     f"且已经核验过的那 {len(published)} 条。"]
+            if matched:
+                lines.append("\n想看是哪些，说「列出来」。")
+            else:
+                lines.append("\n一个都没有。想放宽哪一条，说了我再数。")
+            return ChatResult("\n".join(lines), "count")
+
+        # 没说条件，就报总账。
+        lines = [
+            "**库里现在的数**",
+            "",
+            f"- 已核验、还在报名期内：**{len(published)} 个**",
+            f"- 已过报名截止：{len(expired)} 个",
+            f"- 采集到但还没核验完（线索）：{len(pending)} 个",
+            f"- 合计 {len(projects)} 条",
+            "",
+            "> 只有第一行那些会进正式推荐。线索区的不作数，"
+            "过期的只在你点名查询时才拿得到。",
+        ]
+        lines.append("\n想按条件数，直接说——比如「北京的有几个」「有经费的有多少」"
+                     "「哪个省份最多」。")
+        return ChatResult("\n".join(lines), "count")
+
+    @staticmethod
+    def _really_matching(projects: list[dict[str, Any]],
+                         profile: dict[str, Any]) -> list[dict[str, Any]]:
+        """真正满足用户说的地点/主题的那些。
+
+        **不能拿 recommend_projects 的 eligible 来数。** 地点和主题在打分里是
+        加分项、不是过滤器，eligible 里塞满了"条件对不上但按时间补位"的项目。
+        实测「北京的有几个」因此答成 25，而同一次会话里「哪个省份最多」显示
+        北京只有 3 个——同一份数据自己打自己脸，比答不上来更糟。
+        """
+        wanted_places = set(profile.get("preferred_locations") or [])
+        wanted_themes = set(profile.get("themes") or [])
+        hit = []
+        for project in projects:
+            if wanted_places:
+                where = project_location_text(project)
+                if not any(place in where for place in wanted_places):
+                    continue
+            if wanted_themes and not (wanted_themes & set(project.get("theme_tags") or [])):
+                continue
+            # 数数的时候 required 和 preferred 一样处理：用户问「有经费的有几个」，
+            # 要的是"真有经费的有几条"，不是"我推荐时会优先它们"。
+            # 只按 required 过滤的话，这句会答成 25（全部在招的），而实际只有个位数
+            # ——跟「北京的有几个」答成 25 是同一类谎。
+            if profile.get("reimbursement_preference") != "not_important" and (
+                    project.get("reimbursement") or {}).get("has_reimbursement") is not True:
+                continue
+            hit.append(project)
+        return hit
+
+    def _distribution(self, projects: list[dict[str, Any]], kind: str) -> str:
+        counter: Counter[str] = Counter()
+        blank = 0
+        for project in projects:
+            if kind == "省份":
+                value = (project.get("location") or {}).get("province") or ""
+            else:
+                tags = [t for t in (project.get("theme_tags") or []) if t != "综合实践"]
+                value = tags[0] if tags else ""
+            if value:
+                counter[value] += 1
+            else:
+                blank += 1
+        if not counter:
+            return f"库里的项目都没写明{kind}，这个我数不出来。"
+        lines = [f"**按{kind}数（共 {len(projects)} 条）**", ""]
+        for name, count in counter.most_common(8):
+            lines.append(f"- {name}：{count} 个")
+        if len(counter) > 8:
+            lines.append(f"- 其余 {len(counter) - 8} 个{kind}各 1-2 个")
+        if blank:
+            lines.append(f"\n另有 **{blank} 条原文没写明{kind}**，没法归类——"
+                         "这个数字本身也说明了采集到的通知有多少是信息不全的。")
         return "\n".join(lines)
 
     def _list_leads(self) -> str:
