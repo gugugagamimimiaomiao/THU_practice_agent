@@ -25,8 +25,8 @@ from pathlib import Path
 import chat_adapter
 from chat_adapter import PracticeChatAdapter
 from database import Database
-from domain import (DEPARTMENT_ACCOUNT_ALIASES, SCHOOLWIDE_ACCOUNTS,
-                    department_affinity, department_of_account, score_project)
+from domain import (DEPARTMENT_ACCOUNT_ALIASES, SCHOOLWIDE_ACCOUNTS, _is_practice_like,
+                    department_affinity, department_of_account, recommend_projects)
 
 
 class ListLeadsTests(unittest.TestCase):
@@ -113,23 +113,52 @@ class AccountAliasTests(unittest.TestCase):
         self.assertFalse(department_affinity(project, "新雅书院"))
 
 
-class NonPracticeRanksLowerTests(unittest.TestCase):
-    def _score(self, title, **extra):
-        project = {"id": "x", "title": title, "summary": "", "status": "published",
+class NonPracticeIsSetAsideTests(unittest.TestCase):
+    """校内活动不进正式推荐，但也不删——单独一桶。
+
+    原来是扣 12 分压到后面。后来量了真实数据：已发布的 25 条里只有 8 条是
+    实践，17 条是体育代表队、学生组织招新、学科竞赛。池子里三分之二是杂物，
+    扣多少分都会有几条挤进前五。改成分桶。
+    """
+
+    def _project(self, title, **extra):
+        project = {"id": title, "title": title, "summary": "", "status": "published",
                    "theme_tags": ["公益志愿"], "uncertain_fields": [], "confidence": 0.9,
                    "eligibility": {}, "reimbursement": {}, "location": {},
-                   "source_account": "", "organizer": ""}
+                   "signup_deadline": "2099-12-31", "source_account": "", "organizer": ""}
         project.update(extra)
-        return score_project(project, {"themes": [], "preferred_locations": []}).score
+        return project
 
-    def test_a_sports_team_scores_lower_than_a_real_practice(self):
-        practice = self._score("实践招募丨赴某地支教实践支队招募")
-        sports = self._score("【代表队招新】体育集结号——贵系男篮篇")
-        self.assertGreater(practice, sports)
+    def _recommend(self, *titles):
+        projects = [self._project(t) for t in titles]
+        return recommend_projects(projects, {"themes": [], "preferred_locations": []})
 
-    def test_it_is_pushed_down_not_removed(self):
-        """有人确实在找体育队，压后面就行，不该完全看不见。"""
-        self.assertGreater(self._score("【代表队招新】体育集结号——贵系男篮篇"), 0)
+    def test_a_sports_team_never_enters_the_recommendation(self):
+        result = self._recommend("实践招募丨赴某地支教实践支队招募",
+                                 "【代表队招新】体育集结号——贵系男篮篇")
+        listed = [item["project"]["title"] for item in result["eligible"]]
+        self.assertIn("实践招募丨赴某地支教实践支队招募", listed)
+        self.assertNotIn("【代表队招新】体育集结号——贵系男篮篇", listed)
+
+    def test_it_is_set_aside_not_deleted(self):
+        """判错了要能翻出来，采集也是一条条攒的，不该直接扔。"""
+        result = self._recommend("【代表队招新】体育集结号——贵系男篮篇")
+        aside = [item["project"]["title"] for item in result["campus"]]
+        self.assertIn("【代表队招新】体育集结号——贵系男篮篇", aside)
+
+    def test_a_real_practice_is_never_set_aside(self):
+        result = self._recommend("实践招募丨赴某地支教实践支队招募",
+                                 "志愿者招募 | 社区暑期儿童科普课堂")
+        self.assertEqual(result["campus"], [])
+        self.assertEqual(len(result["eligible"]), 2)
+
+    def test_the_scoring_helper_agrees_with_the_classifier(self):
+        """打分里那道判据和采集侧的分类器必须是同一套，不能各说各话。"""
+        for title, want in (("实践招募丨赴某地支教实践支队招募", True),
+                            ("【代表队招新】体育集结号——贵系男篮篇", False),
+                            ("2026年秋校团委宣传部学生骨干招募", False)):
+            with self.subTest(title=title):
+                self.assertEqual(_is_practice_like(self._project(title)), want)
 
 
 if __name__ == "__main__":

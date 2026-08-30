@@ -23,6 +23,7 @@ from typing import Any, Callable, Iterable
 
 import llm
 from database import Database
+from opportunity_filter import opportunity_kind
 from domain import (
     department_affinity,
     FIELD_LABELS,
@@ -1021,6 +1022,10 @@ DETAIL_WORDS = ("详情", "介绍", "资格", "截止", "报销", "地点", "时
 # 「看看那 22 条线索」「线索都有哪些」——要看的是待核验那一堆，不是正式推荐。
 _LEADS_RE = re.compile(r"线索|待核验|没核实|未核实|待复核|复核队列")
 
+# 「校内活动有哪些」——被挪出正式推荐的那一桶。这句话是我们自己在回复末尾
+# 教用户说的，必须接得住；今天已经因为"教了却接不住"栽过三次。
+_CAMPUS_RE = re.compile(r"校内活动|体育队|代表队|社团招新|部门招新|学生组织招新")
+
 # 撤掉某一类条件。左边是 profile 里要清空的字段，右边是怎么说算撤。
 _RELAXABLE: tuple[tuple[tuple[str, ...], re.Pattern[str]], ...] = (
     (("preferred_locations", "location_labels", "excluded_locations",
@@ -1292,6 +1297,8 @@ class PracticeChatAdapter:
         # 而 list_leads 的标题本来就写着「共 N 条」，那一问已经答了。
         if _LEADS_RE.search(latest):
             return ChatResult(self._list_leads(), "list_leads")
+        if _CAMPUS_RE.search(latest):
+            return ChatResult(self._list_campus(), "list_campus")
         # 问数字就给数字。必须排在 RECOMMEND_WORDS / FILTER_WORDS 之前：
         # 「现在还能报名的有几个」里的「报名」、「有经费支持的有几个」里的
         # 「经费」都会先被推荐分支接走，然后甩一份列表回去——而用户要的是
@@ -2365,6 +2372,13 @@ class PracticeChatAdapter:
             lines.append("想知道某一条卡在哪，说出它标题里的几个字。")
         if result["excluded"]:
             lines.append(f"\n另有 {len(result['excluded'])} 个项目因截止、时间、资格或经费硬条件被排除。")
+        # 挪走的东西必须让用户看得见，否则就成了静默隐藏——他不知道库里
+        # 还有这些，也不知道我按什么标准挪的，更没法告诉我挪错了。
+        if result.get("campus"):
+            lines.append(
+                f"\n还有 {len(result['campus'])} 条是**校内活动**（体育代表队、"
+                "社团与部门招新、学科竞赛、讲座），不是社会实践，没放进上面。"
+                "想看的话说「校内活动有哪些」。")
 
         # 采集进来的项目默认是 needs_review，只有人工核验过才进正式推荐。
         # 真实数据下这一批往往比正式推荐多得多，不说明的话用户会以为"就这么点项目"。
@@ -3805,7 +3819,16 @@ class PracticeChatAdapter:
         """
         latest = user_messages[-1] if user_messages else ""
         projects = [p for p in self._projects(include_expired=True) if not p.get("demo_data")]
-        published = [p for p in projects if p.get("status") == "published"]
+        # 校内活动不进推荐池，报数时也得分开——否则「还能报名 25 个」跟
+        # 「推荐几个实践」只给出 5 条加一句"另有 17 条校内活动"自相矛盾。
+        # 跟早先「北京的有几个」答 25、而按省份数只有 3 个是同一类错。
+        def _is_practice(project: dict[str, Any]) -> bool:
+            return opportunity_kind(project.get("title", ""),
+                                    project.get("source_account", "")) == "practice"
+        published = [p for p in projects
+                     if p.get("status") == "published" and _is_practice(p)]
+        campus = [p for p in projects
+                  if p.get("status") == "published" and not _is_practice(p)]
         expired = [p for p in projects if p.get("status") == "expired"]
         pending = [p for p in projects if p.get("status") == "needs_review"]
 
@@ -3818,14 +3841,17 @@ class PracticeChatAdapter:
         # 问的是某个状态有几个。
         for words, label, bucket in (
             (("过期", "截止", "过了", "结束"), "已过报名截止", expired),
-            (("还能报", "在招", "可以报", "能报名", "正在", "有效"), "还能报名", published),
+            (("还能报", "在招", "可以报", "能报名", "正在", "有效"),
+             "社会实践/志愿服务，还能报名", published),
             (("待核验", "没核实", "未核实", "线索"), "待核验", pending),
+            (("校内活动", "体育队", "代表队", "社团招新"), "校内活动（不进推荐）", campus),
         ):
             if any(word in latest for word in words):
                 return ChatResult(
                     f"**{len(bucket)} 个**{label}。\n\n"
-                    f"库里合计 {len(projects)} 条：还能报名 {len(published)}、"
-                    f"已过截止 {len(expired)}、待核验 {len(pending)}。",
+                    f"库里合计 {len(projects)} 条：实践/志愿在招 {len(published)}、"
+                    f"校内活动 {len(campus)}、已过截止 {len(expired)}、"
+                    f"待核验 {len(pending)}。",
                     "count")
 
         profile = self._profile_from_turns(user_messages)
@@ -3853,13 +3879,15 @@ class PracticeChatAdapter:
         lines = [
             "**库里现在的数**",
             "",
-            f"- 已核验、还在报名期内：**{len(published)} 个**",
+            f"- 社会实践/志愿服务，还在报名期内：**{len(published)} 个**",
+            f"- 校内活动（体育代表队、社团与部门招新、学科竞赛）：{len(campus)} 个",
             f"- 已过报名截止：{len(expired)} 个",
             f"- 采集到但还没核验完（线索）：{len(pending)} 个",
             f"- 合计 {len(projects)} 条",
             "",
-            "> 只有第一行那些会进正式推荐。线索区的不作数，"
-            "过期的只在你点名查询时才拿得到。",
+            "> 只有第一行那些会进正式推荐。校内活动照常在库里，说"
+            "「校内活动有哪些」能看；线索区的不作数；过期的只在你点名查询时"
+            "才拿得到。",
         ]
         lines.append("\n想按条件数，直接说——比如「北京的有几个」「有经费的有多少」"
                      "「哪个省份最多」。")
@@ -3918,6 +3946,32 @@ class PracticeChatAdapter:
         if blank:
             lines.append(f"\n另有 **{blank} 条原文没写明{kind}**，没法归类——"
                          "这个数字本身也说明了采集到的通知有多少是信息不全的。")
+        return "\n".join(lines)
+
+    def _list_campus(self) -> str:
+        """被挪出正式推荐的校内活动。
+
+        挪走不等于藏起来。用户得能看到库里还有这些、我按什么标准挪的，
+        以及——最要紧的——如果我挪错了，他能当场指出来。
+        """
+        items = [p for p in self._projects(include_expired=False)
+                 if p.get("status") == "published" and not p.get("demo_data")
+                 and opportunity_kind(p.get("title", ""),
+                                      p.get("source_account", "")) != "practice"]
+        if not items:
+            return ("现在没有被挪出去的校内活动。\n\n"
+                    "说「推荐几个实践」看正式推荐。")
+        lines = [f"## 校内活动（{len(items)} 条）", "",
+                 "这些是**招募，但不是社会实践/志愿服务**——体育代表队、社团与"
+                 "部门招新、学科竞赛、讲座。它们照常在库里，只是不进「推荐几个"
+                 "实践」的结果，免得把真正的实践挤下去。", ""]
+        for index, project in enumerate(items[:15], 1):
+            deadline = project.get("signup_deadline") or "截止待确认"
+            lines.append(f"{index}. **{project['title']}**（{deadline}）")
+        if len(items) > 15:
+            lines.append(f"\n（还有 {len(items) - 15} 条）")
+        lines.append("\n> 觉得我把哪条分错了，直接说项目名，我看看是判据的问题"
+                     "还是这条本来就该在实践里。")
         return "\n".join(lines)
 
     def _list_leads(self) -> str:

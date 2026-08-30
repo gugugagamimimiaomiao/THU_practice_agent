@@ -12,8 +12,12 @@ import re
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Any, Iterable
+from typing import Any
+
+from typing import Iterable
 from urllib.parse import parse_qs, urlparse, urlunparse
+
+from opportunity_filter import opportunity_kind
 
 
 DATE_RE = re.compile(r"(?:(20\d{2})[年./-])?(\d{1,2})[月./-](\d{1,2})日?")
@@ -272,15 +276,16 @@ def department_affinity(project: dict[str, Any], department: str) -> str:
 # 「本院系」应该是同类之中优先，而不是把不同类的顶上来。库里混进大量
 # 非实践内容（体育队、学生节、舞会主持、部门招新）是采集范围的另一个问题，
 # 但不能因为根因在别处就放任这里的退化。
-_PRACTICE_LIKE_WORDS = ("实践", "志愿", "支教", "调研", "公益", "服务", "支队")
-
-
 def _is_practice_like(project: dict[str, Any]) -> bool:
-    # 只看标题和摘要，不看 theme_tags。主题标签本身就宽（「公益志愿」曾经
-    # 覆盖 42/43），拿它放行的话「未央书院学生组织补招新」这种部门招新
-    # 也会被当成实践，照样挤掉真正的实践项目。
-    blob = f"{project.get('title', '')} {project.get('summary', '')}"
-    return any(word in blob for word in _PRACTICE_LIKE_WORDS)
+    """这条是不是社会实践/志愿服务。
+
+    判据统一交给 opportunity_filter.opportunity_kind，不再在这里维护第二套
+    关键词。之前这里有一份 ("实践","志愿","支教","调研","公益","服务","支队")，
+    跟采集侧的判据各说各话——「校团委学习实践部组长招募」在这里因为含
+    「实践」被放行，在那边被判成部门招新。同一件事留两份，必漂。
+    """
+    return opportunity_kind(project.get("title", ""),
+                            project.get("source_account", "")) == "practice"
 
 # 抽取器内部用英文字段名，但「待确认字段」是要直接给学生看的——
 # 甩一串 eligibility、reimbursement 没人看得懂。
@@ -1268,13 +1273,6 @@ def score_project(project: dict[str, Any], profile: dict[str, Any], *, today: da
     # 计算机系学生问「推荐几个暑期实践」，前三名是「学生节征名」「男篮招新」
     # 「中长跑队招新」——酒井资讯是计算机系的号，这些全被判成"本院系发的"。
     # 「本院系」应该是同类之中优先，不是把不同类的顶上来。
-    # 体育队招新、学生节征名、部门招新这些不是社会实践，但确实在库里
-    # （采集范围偏宽是另一件事）。不删，只压到后面去——用户问「推荐几个
-    # 暑期实践」时它们不该出现在前排。扣 12 分：足以让它们让位给任何一条
-    # 真实践，又不至于把它们打到完全看不见（有人确实在找体育队）。
-    if not _is_practice_like(project):
-        score -= 12
-
     affinity = department_affinity(project, str(profile.get("department", "")).strip())
     if affinity:
         score += 20
@@ -1295,6 +1293,7 @@ def recommend_projects(projects: list[dict[str, Any]], profile: dict[str, Any], 
     eligible: list[dict[str, Any]] = []
     potential: list[dict[str, Any]] = []
     excluded: list[dict[str, Any]] = []
+    campus: list[dict[str, Any]] = []
     for project in projects:
         # rejected 是人工判定过"这条不该出现"。以前它会落进 else 分支，
         # 于是作为「潜在机会」照样露出来——等于驳回不生效。
@@ -1302,6 +1301,18 @@ def recommend_projects(projects: list[dict[str, Any]], profile: dict[str, Any], 
             continue
         result = score_project(project, profile, today=today)
         item = result.to_dict()
+        # 体育代表队、学科竞赛、留学讲座、学生组织招新——是招募，但不是
+        # 社会实践/志愿服务。单独放一桶，不进正式推荐。
+        #
+        # 为什么不能只靠降权：已发布的 25 条里只有 8 条是实践，17 条是校内
+        # 活动。池子里三分之二是杂物，扣多少分都会有几条挤进前五。
+        #
+        # 为什么不删：判错了就静默丢掉一条真机会，而且采集是一条条攒的。
+        # 分成一桶，出错能翻出来，也随时能改判据重来。
+        if opportunity_kind(project.get("title", ""), project.get("source_account", "")) != "practice":
+            if not result.excluded_reasons and project.get("status") == "published":
+                campus.append(item)
+            continue
         if result.excluded_reasons:
             excluded.append(item)
         elif project.get("status") == "published":
@@ -1319,6 +1330,7 @@ def recommend_projects(projects: list[dict[str, Any]], profile: dict[str, Any], 
 
     eligible.sort(key=_rank)
     potential.sort(key=_rank)
+    campus.sort(key=_rank)
     excluded.sort(key=lambda item: item["score"], reverse=True)
 
     asked_locations = bool(_as_set(profile.get("preferred_locations")))
@@ -1326,6 +1338,9 @@ def recommend_projects(projects: list[dict[str, Any]], profile: dict[str, Any], 
         "eligible": eligible,
         "potential": potential,
         "excluded": excluded,
+        # 校内活动（体育代表队、学科竞赛、社团/部门招新…）：入库了，
+        # 但不是社会实践，不进正式推荐。展示层要拿它写一句"另有 N 条"。
+        "campus": campus,
         # 展示层要靠这几个数字写出「符合的有 N 个」或「一个都没有」，
         # 而不是在没命中的时候干脆不提地域。
         "location_asked": asked_locations,
