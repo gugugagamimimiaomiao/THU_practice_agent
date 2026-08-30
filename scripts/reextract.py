@@ -96,8 +96,26 @@ def run_pending_ocr(database: Database, *, apply: bool) -> int:
         fresh["created_at"] = project.get("created_at", fresh["created_at"])
         fresh["image_sources"] = images
         fresh["image_ocr_status"] = "completed"
-        fresh["risk_notes"] = list(dict.fromkeys(
-            fresh.get("risk_notes", []) + ["关键字段来自配图 OCR，发布前请与原图核对日期、金额和联系方式"]))
+        # 「配图尚未识别」这句话是入库时写死进 risk_notes 的，重抽会原样再写
+        # 一遍——而我们刚刚**已经识别过了**。不清掉的话，界面上会挂着一句
+        # 假话，还指着一个不存在的出路（"去看图"）。
+        #
+        # 而且真相更有用：图也读了，里面确实没有报名信息。审核的人看到这句
+        # 才知道别再指望配图，直接去问主办方。
+        notes = [note for note in fresh.get("risk_notes", []) if "配图尚未识别" not in note]
+        notes.append("关键字段来自配图 OCR，发布前请与原图核对日期、金额和联系方式")
+        still_missing = [
+            label for label, value in (
+                ("报名截止", fresh.get("signup_deadline")),
+                ("参与资格", (fresh.get("eligibility") or {}).get("restriction_text")),
+                ("报名方式", fresh.get("signup_method")),
+            ) if not value
+        ]
+        if still_missing:
+            notes.append(
+                f"{len(images)} 张配图已识别，图里也没有{'、'.join(still_missing)}"
+                "——这几项要向主办方确认，不要再等 OCR。")
+        fresh["risk_notes"] = list(dict.fromkeys(notes))
         for field in ("signup_deadline", "practice_start", "location", "eligibility"):
             before, after = describe(project, field), describe(fresh, field)
             if before != after:
