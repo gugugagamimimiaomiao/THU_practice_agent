@@ -805,6 +805,12 @@ _NOT_ACTUALLY_NEGATIVE = (
 )
 
 
+# 讲过去经历的句子。这些是自我介绍，不是筛选条件。
+_EXPERIENCE_RE = re.compile(
+    r"(做过|参加过|参与过|去过|待过|干过|担任过|当过|经历过)"
+    r"|(以前|之前|曾经|原来|从前|大一(?:的时候|时)|上(?:学期|次|半年)|去年|前年)")
+
+
 def _is_negative_clause(clause: str) -> bool:
     text = clause.strip()
     if any(word in text for word in _NOT_ACTUALLY_NEGATIVE):
@@ -950,7 +956,13 @@ def _autolink(url: str) -> str:
 
 # 「比较」当副词用时不是要对比项目：「比较多」「比较难」「比较早」。
 # 「哪些主题的实践比较多」实测被这个词抢走，变成了两个项目的对比表格。
-_COMPARE_RE = re.compile(r"比较(?![多少好难易大小早晚快慢久短高低远近贵便])|对比|哪个好|区别|选哪个")
+# 「比较」既是动词也是副词。负向前瞻里列的是**副词用法**后面常跟的字——
+# 「比较好」「比较难」是在形容，不是要我比两个项目。
+# 漏了「喜」栽过一次：学生自述「平时比较喜欢和人打交道」，整段长自述被
+# 路由成了 compare，还自己补了两个项目去比。
+_COMPARE_RE = re.compile(
+    r"比较(?![多少好难易大小早晚快慢久短高低远近贵便喜适想倾偏感熟擅忙累穷富])"
+    r"|对比|哪个好|区别|选哪个")
 
 # 起名/拟标题。用正则而不是硬列词组：「帮我想个推送标题」里"想"和"标题"之间
 # 隔着"个推送"，靠穷举字符串永远补不全。
@@ -1047,7 +1059,18 @@ _CN_MONTHS = {
 
 
 # 「上旬/中旬/下旬」按通行的三分法：1–10、11–20、21–月末。
-_TEN_DAY_SPANS = {"上旬": (1, 10), "中旬": (11, 20), "下旬": (21, 31)}
+# 「月初/月中/月底」是同一件事的口语说法，一起认。
+_TEN_DAY_SPANS = {
+    "上旬": (1, 10), "月初": (1, 10), "初": (1, 10),
+    "中旬": (11, 20), "月中": (11, 20),
+    "下旬": (21, 31), "月底": (21, 31), "月末": (21, 31), "底": (21, 31),
+}
+# 「八月底九月初」——跨月的口语区间。实测被读成整个八月，一个月的窗口
+# 跟什么都不冲突，等于时间这条件白说。
+_CROSS_MONTH_RE = re.compile(
+    r"(?<!\d)(1[0-2]|[1-9]|[一二三四五六七八九十]+)\s*月\s*(底|末|下旬)\s*"
+    r"(?:到|至|-|—|~|～)?\s*"
+    r"(1[0-2]|[1-9]|[一二三四五六七八九十]+)\s*月\s*(初|上旬)")
 # 「9月10号到9月20号」这类明确区间。日期里的「号」和「日」都要认。
 _DAY_RANGE_RE = re.compile(
     r"(?<!\d)(1[0-2]|[1-9])\s*月\s*(\d{1,2})\s*[日号]?\s*(?:到|至|-|—|~|～)\s*"
@@ -1078,6 +1101,27 @@ def _month_span(text: str) -> tuple[str, str] | None:
     现在按精确度从高到低试：明确区间 → 单日 → 旬 → 整月。
     """
     today = date.today()
+
+    # 0）跨月口语区间：「八月底九月初」。要排在整月匹配之前，否则先命中
+    #    「八月」就被撑成整个八月了。
+    match = _CROSS_MONTH_RE.search(text)
+    if match:
+        def _month_of(raw: str) -> int | None:
+            raw = raw.strip()
+            if raw.isdigit():
+                return int(raw)
+            return _CN_MONTHS.get(raw)
+        m1, m2 = _month_of(match.group(1)), _month_of(match.group(3))
+        if m1 and m2:
+            # 年份看**结束**那天，不看开始那天。今天是 8 月 29 日时用户说
+            # 「八月底九月初」，指的显然是现在；按开始日（8/21，已过）判年
+            # 会推到明年，把一个正在发生的窗口算成一年之后。
+            for year in (today.year, today.year + 1):
+                end_year = year + 1 if m2 < m1 else year
+                start = date(year, m1, 21)
+                end = date(end_year, m2, 10)
+                if end >= today:
+                    return start.isoformat(), end.isoformat()
 
     # 1）明确区间：「9月10号到9月20号」「9月10日至20日」
     match = _DAY_RANGE_RE.search(text)
@@ -1476,6 +1520,37 @@ class PracticeChatAdapter:
     # 回执区的可信度。改成不需要分词也能说实话的办法：在主题那行里挑明
     # "这是大类匹配"，见 _theme_note。
 
+    @classmethod
+    def _all_stopwords(cls, token: str) -> bool:
+        """这个片段是不是纯粹由通用词拼出来的。
+
+        单看「实践」「项目」都在停用词表里，可「实践项目」四个字连起来就
+        绕过去了。实测后果很严重：学生写「想找一个能真正深入基层、**不是
+        走马观花的实践项目**」，否定小句里挖出「实践项目」，系统当场理解成
+        「不要实践项目」——他想要实践，我们读成他不要实践，正好相反。
+
+        拆开看：每一段都是通用词，整体就还是通用词。跟 _distinctive_overlap
+        里那个 residue 判据是同一个思路。
+        """
+        if token in cls._TERM_STOPWORDS:
+            return True
+        residue = token
+        for word in sorted(cls._TERM_STOPWORDS, key=len, reverse=True):
+            residue = residue.replace(word, "")
+        if not residue.strip():
+            return True
+        # 滑动窗口还会切出跨词边界的残片：挡住了「实践项目」，它就改切
+        # 「实践项」「践项目」，两个都不是纯停用词组合，照样漏过去。
+        # 判据：跟某个停用词重叠两个字以上、去掉重叠后剩不到两个字的，
+        # 就是切碎的残片，不是词。「学生骨干」去掉「学生」还剩「骨干」，留。
+        for word in cls._TERM_STOPWORDS:
+            for size in range(len(word), 1, -1):
+                for start in range(len(word) - size + 1):
+                    piece = word[start:start + size]
+                    if piece in token and len(token.replace(piece, "").strip()) < 2:
+                        return True
+        return False
+
     def _terms_worth_excluding(self, text: str) -> list[str]:
         """从否定小句里挑出能真正落到项目上的片段。
 
@@ -1496,10 +1571,19 @@ class PracticeChatAdapter:
         for hint in _STRICT_HINTS + ("凑", "补位", "外地", "外省"):
             cleaned = cleaned.replace(hint, "")
         hits: list[str] = []
+        # 被判成通用词的片段，它的子串也一起否掉。
+        #
+        # 滑动窗口从长到短切：挡住了「实践项目」，它就改切「实践项」「践项目」
+        # 「践项」——越切越碎，越碎越不像话，而每一个单独看都"不是纯停用词"。
+        # 长的既然否了，短的更没道理留。这一步信息本来就在循环里，不用另想办法。
+        rejected: list[str] = []
         for size in range(6, 1, -1):
             for start in range(len(cleaned) - size + 1):
                 token = cleaned[start:start + size]
-                if token in self._TERM_STOPWORDS:
+                if self._all_stopwords(token):
+                    rejected.append(token)
+                    continue
+                if any(token in dead for dead in rejected):
                     continue
                 if any(token in existing for existing in hits):
                     continue  # 已经被更长的命中覆盖了
@@ -1616,6 +1700,15 @@ class PracticeChatAdapter:
             "reimbursement_preference": "not_important",
         }
         original = text
+        # 讲过去经历的小句先剥掉：那是他**做过**什么，不是他**想要**什么。
+        #
+        # 实测：「我做过一年的校内志愿服务，也参加过一次短期的乡村调研。
+        # 这个暑假想找一个能真正深入基层的实践项目」——「校内」被抽成了
+        # 地点偏好，于是给他推校内的活动，而他明说了想深入基层。
+        # 长自述里这种句子很常见，学生都会先介绍自己再提诉求。
+        text = "，".join(c for c in _split_clauses(text) if not _EXPERIENCE_RE.search(c))
+        if not text.strip():
+            text = original          # 整段都在讲经历时，别把条件全丢了
         # 带否定词的小句单独拎出来：里面的地名、主题进排除表，不进偏好表。
         negative_clauses = [c for c in _split_clauses(text) if _is_negative_clause(c)]
         if negative_clauses:
